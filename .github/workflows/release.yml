@@ -1,0 +1,92 @@
+# Build desktop bundles for macOS + Windows and attach them to the tag's
+# GitHub release. Trigger: git tag vX.Y && git push origin vX.Y
+# (see scripts/build_desktop.sh for the equivalent local macOS build).
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            bundles: dmg
+          - os: windows-latest
+            bundles: nsis
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Install Python deps + PyInstaller
+        run: pip install . pyinstaller
+
+      - name: Build sidecar
+        run: pyinstaller --noconfirm procure-sidecar.spec
+
+      - name: Stage sidecar for Tauri (unix)
+        if: runner.os != 'Windows'
+        run: |
+          TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p src-tauri/binaries
+          cp dist/procure-sidecar "src-tauri/binaries/procure-sidecar-${TRIPLE}"
+
+      - name: Stage sidecar for Tauri (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $triple = ((rustc -vV | Select-String '^host: ') -replace 'host: ','').Trim()
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          Copy-Item dist/procure-sidecar.exe "src-tauri/binaries/procure-sidecar-$triple.exe"
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build Tauri bundle
+        run: cargo tauri build --bundles ${{ matrix.bundles }}
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ runner.os }}
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: bundles
+          merge-multiple: true
+
+      - name: Attach bundles to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bundles/*

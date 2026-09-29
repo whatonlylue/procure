@@ -1,0 +1,30 @@
+[project]
+name = "procure"
+version = "0.1.0"
+description = "Local-first RAG: drag-drop ingest, chunk+embed+store, semantic search."
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "python-multipart>=0.0.9",
+  "numpy>=1.26",
+  "pypdf>=4.0",
+  "mcp>=2,<3",
+  "platformdirs>=4",
+]
+
+[project.optional-dependencies]
+sbert = ["sentence-transformers>=3.0"]
+chroma = ["chromadb>=0.5"]
+all = ["sentence-transformers>=3.0", "chromadb>=0.5"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = ["mcp_guide.md", "static/**"]

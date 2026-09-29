@@ -1,0 +1,84 @@
+"""Sentence-aware text splitter (dependency-free).
+
+Splits on sentence boundaries first, then packs whole sentences into chunks of
+~chunk_size chars with chunk_overlap chars of overlap (whole sentences only,
+so chunks never start or end mid-sentence). Drops chunks <50 chars.
+"""
+from __future__ import annotations
+
+import re
+
+_SENT_END = re.compile(r"(?<=[.!?…])[\"'”’)\]]*\s+")
+_MIN_CHUNK = 50
+
+
+def split_text(
+    text: str,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 150,
+    separators: tuple[str, ...] = ("\n\n", "\n", " ", ""),
+) -> list[str]:
+    del separators  # kept for backwards compatibility; sentences are the unit
+    text = (text or "").replace("\r\n", "\n").strip()
+    if not text:
+        return []
+    sentences = [s for s in _split_sentences(text) if s.strip()]
+    chunks = _pack(sentences, chunk_size, chunk_overlap)
+    return [c for c in chunks if len(c.strip()) >= _MIN_CHUNK]
+
+
+def _split_sentences(text: str) -> list[str]:
+    # Split paragraphs first so the sentence regex never joins across them.
+    out: list[str] = []
+    for para in re.split(r"\n\s*\n", text):
+        para = re.sub(r"\s+", " ", para).strip()
+        if not para:
+            continue
+        start = 0
+        for m in _SENT_END.finditer(para):
+            end = m.end()
+            # Skip splits after common abbreviations / initials ("Mr. X", "U.S.A.").
+            tail = para[start:end].rsplit(" ", 1)[-1]
+            if re.fullmatch(r"(?:[A-Z]\.)+|[A-Z][a-z]?\.", tail.strip()):
+                continue
+            out.append(para[start:end].strip())
+            start = end
+        out.append(para[start:].strip())
+    return out
+
+
+def _pack(sentences: list[str], chunk_size: int, overlap: int) -> list[str]:
+    chunks: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    for sent in sentences:
+        while len(sent) > chunk_size:
+            # Overlong sentence: flush current, then hard-slice the sentence.
+            if cur:
+                chunks.append(" ".join(cur))
+                cur, cur_len = [], 0
+            chunks.append(sent[:chunk_size])
+            sent = sent[chunk_size - overlap:] if overlap < chunk_size else ""
+        if not sent:
+            continue
+        add = len(sent) + (1 if cur else 0)
+        if cur and cur_len + add > chunk_size:
+            chunks.append(" ".join(cur))
+            # Overlap: carry back whole trailing sentences totalling ~overlap.
+            kept: list[str] = []
+            kept_len = 0
+            for s in reversed(cur):
+                if kept and kept_len + len(s) > overlap:
+                    break
+                kept.append(s)
+                kept_len += len(s) + 1
+            cur = list(reversed(kept))
+            cur_len = sum(len(s) for s in cur) + max(0, len(cur) - 1)
+        cur.append(sent)
+        cur_len += len(sent) + (1 if len(cur) > 1 else 0)
+    if cur:
+        chunks.append(" ".join(cur))
+    return chunks
+
+
+

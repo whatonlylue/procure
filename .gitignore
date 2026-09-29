@@ -1,0 +1,18 @@
+.venv/
+data/
+node_modules/
+frontend/dist/
+frontend/node_modules/
+app/static/*
+!app/static/.gitkeep
+__pycache__/
+*.pyc
+*.egg-info/
+.DS_Store
+# Desktop build outputs (rebuilt by scripts/build_desktop.sh)
+/dist/
+/build/
+*.spec.build/
+src-tauri/target/
+src-tauri/binaries/
+src-tauri/gen/
