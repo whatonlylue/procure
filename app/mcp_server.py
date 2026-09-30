@@ -72,6 +72,8 @@ class LibraryDoc(BaseModel):
     chunk_count: int
     error: str = ""
     created_at: str = ""
+    tags: list[str] = []
+    source: str = ""
     uri: str = Field(description="Resource URI for the full document text.")
 
 
@@ -106,11 +108,16 @@ def procure_search(
         list[str] | None,
         Field(description="Optional document IDs to scope the search to (see procure_list_documents)."),
     ] = None,
+    tags: Annotated[
+        list[str] | None,
+        Field(description="Optional tags: only chunks from documents carrying ALL of these tags are searched."),
+    ] = None,
 ) -> list[SearchHit]:
     """Advanced search over the procure library: hybrid BM25 + dense retrieval fused with RRF, then reranked by answerability. Returns matching chunks with filenames, relevance scores, and answerability signals. Use this whenever a question could pertain to stored documents, past conversations, or saved outputs. Each hit's `uri` reads the full document."""
     svc = _svc()
-    logger.info("procure_search q=%r top_k=%d doc_ids=%s", query[:120], top_k, doc_ids)
-    return [SearchHit(**h, uri=_doc_uri(h["doc_id"])) for h in svc.search(query, top_k, doc_ids)]
+    logger.info("procure_search q=%r top_k=%d doc_ids=%s tags=%s", query[:120], top_k, doc_ids, tags)
+    return [SearchHit(**h, uri=_doc_uri(h["doc_id"]))
+            for h in svc.search(query, top_k, doc_ids, tags)]
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -125,13 +132,33 @@ def procure_list_documents() -> list[LibraryDoc]:
 def procure_add_text(
     title: Annotated[str, Field(description="Short title used as the document name.")],
     text: Annotated[str, Field(description="Full text to store: conversation transcript, tool output, notes, or document content.")],
+    tags: Annotated[
+        list[str] | None,
+        Field(description="Optional tags for later filtered search (e.g. ['memory', 'project-x'])."),
+    ] = None,
 ) -> IngestResult:
     """Add new material to the procure library. The text is chunked, embedded, and stored with the given title, and becomes searchable immediately. Use it to persist conversation transcripts, agent outputs, research notes, or any content worth retrieving later."""
     logger.info("procure_add_text title=%r chars=%d", title[:80], len(text or ""))
     if not (text or "").strip():
         raise ValueError("text must not be empty")
-    result = IngestResult(**_svc().ingest_text(title.strip() or "snippet", text))
+    result = IngestResult(
+        **_svc().ingest_text(title.strip() or "snippet", text, tags or []))
     logger.info("procure_add_text -> %s", result)
+    return result
+
+
+@mcp.tool()
+def procure_add_url(
+    url: Annotated[str, Field(description="http(s) URL of an article or page to ingest.")],
+    tags: Annotated[
+        list[str] | None,
+        Field(description="Optional tags for later filtered search."),
+    ] = None,
+) -> IngestResult:
+    """Fetch a web page and add its readable text to the procure library. The article text is extracted, chunked, embedded, and searchable immediately. Use it to persist reference pages worth retrieving later."""
+    logger.info("procure_add_url url=%r", url[:120])
+    result = IngestResult(**_svc().ingest_url(url, tags or []))
+    logger.info("procure_add_url -> %s", result)
     return result
 
 
