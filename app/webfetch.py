@@ -18,7 +18,7 @@ import urllib.request
 
 MAX_BYTES = 6 * 1024 * 1024
 
-_UA = {"User-Agent": "procure/0.2.1 (+local-first personal library)"}
+_UA = {"User-Agent": "procure/0.2.2 (+local-first personal library)"}
 
 _BLOCK = re.compile(
     r"<(?:p|h[1-6]|li|article|section|blockquote|pre|figcaption|td)[^>]*>"

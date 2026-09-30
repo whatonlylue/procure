@@ -123,18 +123,21 @@ fn main() {
 
                 let parsed =
                     url.parse().map_err(|e| format!("bad sidecar URL {url:?}: {e}"))?;
-                WebviewWindowBuilder::new(&handle, "main", WebviewUrl::External(parsed))
+                let builder = WebviewWindowBuilder::new(&handle, "main", WebviewUrl::External(parsed))
                     // Empty title: macOS renders the window title as OS-level
                     // text in the transparent bar, next to the traffic lights.
                     .title("")
-                    // Overlay: no title bar, traffic lights float over the
-                    // content (which reserves top-left space in CSS). The
-                    // transparent strip stays natively draggable. Windows
-                    // ignores this and keeps its normal title bar.
-                    .title_bar_style(tauri::TitleBarStyle::Overlay)
                     .background_color(tauri::window::Color(20, 21, 18, 255))
                     .inner_size(1200.0, 800.0)
-                    .min_inner_size(900.0, 600.0)
+                    .min_inner_size(900.0, 600.0);
+                // Overlay (macOS only): no title bar, traffic lights float
+                // over the content (which reserves top-left space in CSS).
+                // The transparent strip stays natively draggable. Windows
+                // keeps its normal title bar. `title_bar_style` does not
+                // exist on Windows, so this must stay behind `cfg`.
+                #[cfg(target_os = "macos")]
+                let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay);
+                builder
                     .build()
                     .map_err(|e| format!("create window: {e}"))?;
                 Ok::<(), String>(())

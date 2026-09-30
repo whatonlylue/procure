@@ -1,6 +1,6 @@
 [project]
 name = "procure"
-version = "0.2.1"
+version = "0.2.2"
 description = "Local-first RAG: drag-drop ingest, chunk+embed+store, semantic search."
 license = { text = "MIT" }
 requires-python = ">=3.11"
