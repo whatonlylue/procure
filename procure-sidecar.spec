@@ -22,7 +22,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ("app/static", "app/static"),
-        ("app/mcp_guide.md", "app"),
+        ("skills", "skills"),
     ],
     hiddenimports=[
         "uvicorn.logging",
