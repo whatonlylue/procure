@@ -52,6 +52,16 @@ class Settings:
     # MCP server (Streamable HTTP) bind address. Served at http://host:port/mcp.
     mcp_host: str = field(default_factory=lambda: _env("PROCURE_MCP_HOST", "127.0.0.1"))
     mcp_port: int = field(default_factory=lambda: int(_env("PROCURE_MCP_PORT", "8001")))
+    # Folder-watch poll interval in seconds (0 disables the background loop;
+    # manual "sync now" still works).
+    watch_interval: int = field(
+        default_factory=lambda: int(_env("PROCURE_WATCH_INTERVAL", "60")))
+    # OCR: "auto" (thin pages only) | "on" (same as auto; images always OCR) |
+    # "off" (never OCR; scanned files fail with guidance).
+    ocr_mode: str = field(default_factory=lambda: _env("PROCURE_OCR", "auto").lower())
+    # URL fetch timeout in seconds.
+    fetch_timeout: float = field(
+        default_factory=lambda: float(_env("PROCURE_FETCH_TIMEOUT", "20")))
 
     @property
     def hybrid(self) -> bool:
