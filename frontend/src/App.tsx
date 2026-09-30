@@ -3,37 +3,76 @@ import {
   Doc,
   Health,
   Hit,
+  Job,
   McpLogLine,
   McpStatus,
+  TagCount,
+  WatchFolder,
+  addUrl,
+  addWatch,
+  cancelJob,
   deleteDoc,
+  getJob,
   health as fetchHealth,
   listDocs,
+  listTags,
+  listWatches,
   mcpLogs,
   mcpStart,
   mcpStatus,
   mcpStop,
   reingestDoc,
+  removeWatch,
   search,
+  setDocTags,
+  syncWatches,
   updateSettings,
-  uploadFiles,
+  uploadFilesAsync,
 } from "./api";
 
-type Tab = "search" | "library" | "mcp";
-
-interface UploadState {
-  done: number;
-  total: number;
-  current: string;
-  failed: string[];
-}
+type Tab = "search" | "library" | "sources" | "mcp";
 
 function fmt(n: number | undefined): string {
   return typeof n === "number" && Number.isFinite(n) ? `${Math.round(n * 100)}%` : "—";
 }
 
+function parseTags(s: string): string[] {
+  return s.split(",").map((t) => t.trim()).filter(Boolean);
+}
+
+const GREETINGS = [
+  "What do you seek?",
+  "Seek, and you shall find.",
+  "Your library remembers everything.",
+  "What are you hunting today?",
+  "Your second mind awaits.",
+  "What mystery shall we solve?",
+  "Ask, and it shall be found.",
+  "What did you stash away?",
+];
+
+function pickGreeting(): string {
+  // One saying per session, advancing to the next on each fresh launch.
+  try {
+    const pinned = sessionStorage.getItem("procure-greeting");
+    if (pinned !== null) {
+      const i = Number(pinned);
+      if (Number.isInteger(i) && i >= 0 && i < GREETINGS.length) return GREETINGS[i];
+    }
+    const last = Number(localStorage.getItem("procure-greeting-last") ?? "NaN");
+    const next = Number.isInteger(last) && last >= 0 ? (last + 1) % GREETINGS.length : 0;
+    localStorage.setItem("procure-greeting-last", String(next));
+    sessionStorage.setItem("procure-greeting", String(next));
+    return GREETINGS[next];
+  } catch {
+    return GREETINGS[0];
+  }
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>("search");
   const [docs, setDocs] = useState<Doc[]>([]);
+  const [tags, setTags] = useState<TagCount[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<Hit[]>([]);
@@ -41,24 +80,50 @@ export default function App() {
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [drag, setDrag] = useState(false);
-  const [upload, setUpload] = useState<UploadState | null>(null);
+  const [job, setJob] = useState<Job | null>(null);
   const [topK, setTopK] = useState(10);
   const [backend, setBackend] = useState<Health | null>(null);
   const [mcp, setMcp] = useState<McpStatus | null>(null);
   const [mcpLines, setMcpLines] = useState<McpLogLine[]>([]);
   const [copied, setCopied] = useState(false);
+  // Search scope.
+  const [filterTags, setFilterTags] = useState<Set<string>>(new Set());
+  const [scopeDocs, setScopeDocs] = useState<Set<string>>(new Set());
+  const [scopeSource, setScopeSource] = useState("");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [greeting] = useState<string>(pickGreeting);
+  // Library tag editor.
+  const [editingTags, setEditingTags] = useState<string | null>(null);
+  const [tagDraft, setTagDraft] = useState("");
+  // Sources tab.
+  const [url, setUrl] = useState("");
+  const [urlTags, setUrlTags] = useState("");
+  const [watches, setWatches] = useState<WatchFolder[]>([]);
+  const [lastScan, setLastScan] = useState<string | null>(null);
+  const [watchPath, setWatchPath] = useState("");
+  const [watchRecursive, setWatchRecursive] = useState(true);
   const fileRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const mcpNext = useRef(0);
   const mcpLogRef = useRef<HTMLPreElement>(null);
   const mcpFollow = useRef(true);
+  const pollRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [d, h, m] = await Promise.all([listDocs(), fetchHealth(), mcpStatus()]);
+      const [d, h, m, t, w] = await Promise.all([
+        listDocs(),
+        fetchHealth(),
+        mcpStatus(),
+        listTags(),
+        listWatches(),
+      ]);
       setDocs(d);
       setBackend(h);
       setMcp(m);
+      setTags(t);
+      setWatches(w.folders);
+      setLastScan(w.last_scan);
     } catch (e) {
       setNotice(String(e));
     }
@@ -67,6 +132,19 @@ export default function App() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current !== null) window.clearInterval(pollRef.current);
+    };
+  }, []);
+
+  function stopPoll() {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }
 
   // While the MCP tab is open, poll status + append new server output.
   useEffect(() => {
@@ -119,32 +197,63 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  function summarizeResults(res: unknown): string {
+    if (!Array.isArray(res)) return "Ingest complete.";
+    const docs = res as { status?: string; filename?: string }[];
+    const ready = docs.filter((d) => d.status === "ready").length;
+    const dup = docs.filter((d) => d.status === "duplicate").length;
+    const failed = docs.filter((d) => d.status === "failed");
+    const cancelled = docs.filter((d) => d.status === "cancelled").length;
+    const parts = [`Ingested ${ready}`];
+    if (dup) parts.push(`${dup} duplicate${dup === 1 ? "" : "s"} skipped`);
+    if (cancelled) parts.push(`${cancelled} cancelled`);
+    if (failed.length) parts.push(`Failed: ${failed.map((f) => f.filename).join(", ")}`);
+    return parts.join(". ") + ".";
+  }
+
+  function pollJob(id: string) {
+    stopPoll();
+    pollRef.current = window.setInterval(async () => {
+      try {
+        const j = await getJob(id);
+        setJob(j);
+        if (j.status === "done" || j.status === "failed" || j.status === "cancelled") {
+          stopPoll();
+          setBusy("");
+          setNotice(j.status === "failed" ? `Job failed: ${j.error}` : summarizeResults(j.result));
+          await refresh();
+        }
+      } catch (e) {
+        stopPoll();
+        setBusy("");
+        setNotice(String(e));
+      }
+    }, 500);
+  }
+
   async function handleFiles(files: FileList | File[]) {
     const arr = Array.from(files);
     if (!arr.length) return;
     setNotice("");
-    setUpload({ done: 0, total: arr.length, current: arr[0].name, failed: [] });
-    const failed: string[] = [];
-    let ok = 0;
-    // Sequential per-file POSTs so progress is visible per file.
-    for (let i = 0; i < arr.length; i++) {
-      setUpload({ done: i, total: arr.length, current: arr[i].name, failed: [...failed] });
-      setBusy(`Uploading ${i + 1}/${arr.length} — ${arr[i].name}`);
-      try {
-        await uploadFiles([arr[i]]);
-        ok++;
-      } catch {
-        failed.push(arr[i].name);
-      }
+    setBusy(`Uploading ${arr.length} file(s)…`);
+    try {
+      const j = await uploadFilesAsync(arr);
+      setJob(j);
+      pollJob(j.job_id);
+    } catch (e) {
+      setBusy("");
+      setNotice(String(e));
     }
-    setUpload({ done: arr.length, total: arr.length, current: "", failed });
-    setBusy("");
-    setNotice(
-      failed.length
-        ? `Ingested ${ok}/${arr.length}. Failed: ${failed.join(", ")}`
-        : `Ingested ${ok} file(s).`
-    );
-    await refresh();
+  }
+
+  async function cancelCurrentJob() {
+    if (!job) return;
+    try {
+      const j = await cancelJob(job.job_id);
+      setJob(j);
+    } catch (e) {
+      setNotice(String(e));
+    }
   }
 
   async function runSearch(e?: React.FormEvent) {
@@ -153,7 +262,11 @@ export default function App() {
     setBusy("Searching…");
     setNotice("");
     try {
-      const res = await search(query, topK);
+      const res = await search(query, topK, {
+        docIds: scopeDocs.size ? [...scopeDocs] : undefined,
+        tags: filterTags.size ? [...filterTags] : undefined,
+        source: scopeSource || undefined,
+      });
       setHits(res);
       setSearched(query);
     } catch (err) {
@@ -163,8 +276,32 @@ export default function App() {
     }
   }
 
+  function clearSearch() {
+    setQuery("");
+    setHits([]);
+    setSearched("");
+  }
+
   function toggle(id: string) {
     setSelected((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  }
+
+  function toggleTag(t: string) {
+    setFilterTags((s) => {
+      const n = new Set(s);
+      if (n.has(t)) n.delete(t);
+      else n.add(t);
+      return n;
+    });
+  }
+
+  function toggleScopeDoc(id: string) {
+    setScopeDocs((s) => {
       const n = new Set(s);
       if (n.has(id)) n.delete(id);
       else n.add(id);
@@ -199,6 +336,16 @@ export default function App() {
       setNotice(String(e));
     } finally {
       setBusy("");
+    }
+  }
+
+  async function saveTags(id: string) {
+    try {
+      await setDocTags(id, parseTags(tagDraft));
+      setEditingTags(null);
+      await refresh();
+    } catch (e) {
+      setNotice(String(e));
     }
   }
 
@@ -247,7 +394,77 @@ export default function App() {
     }
   }
 
+  async function handleAddUrl(e: React.FormEvent) {
+    e.preventDefault();
+    if (!url.trim() || busy) return;
+    setBusy("Fetching URL…");
+    setNotice("");
+    try {
+      const doc = await addUrl(url.trim(), parseTags(urlTags));
+      setUrl("");
+      setUrlTags("");
+      setNotice(
+        doc.status === "duplicate"
+          ? `Already in library as ${doc.filename}.`
+          : doc.status === "failed"
+            ? `Failed: ${doc.error}`
+            : `Added ${doc.filename} (${doc.chunk_count} chunks).`
+      );
+      await refresh();
+    } catch (e) {
+      setNotice(String(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function handleAddWatch(e: React.FormEvent) {
+    e.preventDefault();
+    if (!watchPath.trim() || busy) return;
+    setBusy("Adding watch…");
+    setNotice("");
+    try {
+      await addWatch(watchPath.trim(), watchRecursive);
+      setWatchPath("");
+      setNotice("Watching folder — first sync running in background.");
+      const j = await syncWatches();
+      setJob(j);
+      pollJob(j.job_id);
+      await refresh();
+    } catch (e) {
+      setNotice(String(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function handleRemoveWatch(id: number) {
+    setNotice("");
+    try {
+      await removeWatch(id);
+      await refresh();
+    } catch (e) {
+      setNotice(String(e));
+    }
+  }
+
+  async function handleSyncWatches() {
+    if (busy) return;
+    setBusy("Syncing folders…");
+    setNotice("");
+    try {
+      const j = await syncWatches();
+      setJob(j);
+      pollJob(j.job_id);
+    } catch (e) {
+      setBusy("");
+      setNotice(String(e));
+    }
+  }
+
   const ready = docs.filter((d) => d.status === "ready").length;
+  const hasSearched = searched !== "";
+  const activeFilterCount = filterTags.size + scopeDocs.size + (scopeSource ? 1 : 0);
   const searchMode = (backend?.search ?? "hybrid").toLowerCase() === "dense" ? "dense" : "hybrid";
   const mode = searchMode === "hybrid" ? "Keywords + meaning" : "Meaning only";
   const rerankOff = ["", "0", "false", "no", "off"].includes((backend?.rerank ?? "on").toLowerCase());
@@ -255,6 +472,13 @@ export default function App() {
   // Raw BM25 word-match scores are unbounded, so normalize against the best
   // match in this result set to display them out of 100.
   const sparseMax = Math.max(0, ...hits.map((h) => h.sparse_score ?? 0));
+  const jobActive = job !== null && (job.status === "queued" || job.status === "running");
+  const jobPct = job && job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
+  const formatHint = (backend?.formats ?? [])
+    .map((f) => f.replace(/^\./, ""))
+    .filter((f) => !["tif", "tiff", "bmp", "webp", "xlsm", "xltx", "htm", "markdown", "textile", "nfo"].includes(f))
+    .join(" / ");
+  const sources = [...new Set(docs.map((d) => d.source).filter(Boolean))].sort();
 
   return (
     <div className="shell">
@@ -262,7 +486,7 @@ export default function App() {
         <div className="side-brand">
           <span className="logo">P</span>
           <span className="wordmark">procure</span>
-          <span className="ver mono">v0.1</span>
+          <span className="ver mono">v0.2.1</span>
         </div>
 
         <div className="side-label">WORKSPACE</div>
@@ -274,8 +498,12 @@ export default function App() {
             <span className="key">2</span> Library
             <span className="count mono">{docs.length}</span>
           </button>
+          <button className={tab === "sources" ? "on" : ""} onClick={() => setTab("sources")}>
+            <span className="key">3</span> Sources
+            {watches.length > 0 && <span className="count mono">{watches.length}</span>}
+          </button>
           <button className={tab === "mcp" ? "on" : ""} onClick={() => setTab("mcp")}>
-            <span className="key">3</span> MCP Server
+            <span className="key">4</span> MCP Server
             {mcp?.running && <span className="dot" title="MCP server running" />}
           </button>
         </nav>
@@ -287,6 +515,7 @@ export default function App() {
           <div><dt>RESULTS</dt><dd>{topK}</dd></div>
           <div><dt>CHUNKS</dt><dd>{backend?.chunks ?? "—"}</dd></div>
           <div><dt>READY</dt><dd>{ready}/{docs.length}</dd></div>
+          <div title="OCR backend for scanned PDFs and images"><dt>OCR</dt><dd>{backend?.ocr || "off"}</dd></div>
         </dl>
         <p className="side-hint">Matching + ranking can be changed from the Search tab.</p>
 
@@ -297,38 +526,15 @@ export default function App() {
       </aside>
 
       <div className="main">
-        <section
-          className={`drop${drag ? " over" : ""}`}
-          onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
-          onDragLeave={() => setDrag(false)}
-          onDrop={(e) => { e.preventDefault(); setDrag(false); handleFiles(e.dataTransfer.files); }}
-          onClick={() => fileRef.current?.click()}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => { if (e.key === "Enter") fileRef.current?.click(); }}
-        >
-          <input
-            ref={fileRef}
-            type="file"
-            multiple
-            hidden
-            onChange={(e) => {
-              if (e.target.files) handleFiles(e.target.files);
-              e.target.value = "";
-            }}
-          />
-          <strong>{drag ? "DROP TO INGEST" : "DRAG + DROP FILES TO INGEST"}</strong>
-          <span className="mono">pdf / docx / pptx / md / txt — or click to browse</span>
-        </section>
-
-        {upload && upload.done < upload.total && (
+        {jobActive && job && (
           <div className="progress" role="status">
             <div className="progress-row mono">
-              <span>FILE {upload.done + 1}/{upload.total}</span>
-              <span className="truncate">{upload.current}</span>
-              <span>{Math.round((upload.done / upload.total) * 100)}%</span>
+              <span>{job.kind === "watch-sync" ? "SYNC" : `FILE ${job.done + 1}/${job.total}`}</span>
+              <span className="truncate">{job.current || job.label}</span>
+              <span>{jobPct}%</span>
+              <button className="danger" onClick={cancelCurrentJob}>Cancel</button>
             </div>
-            <div className="bar"><i style={{ width: `${(upload.done / upload.total) * 100}%` }} /></div>
+            <div className="bar"><i style={{ width: `${jobPct}%` }} /></div>
           </div>
         )}
 
@@ -340,55 +546,148 @@ export default function App() {
         )}
 
         {tab === "search" ? (
-          <main>
-            <form className="q" onSubmit={runSearch}>
-              <input
-                ref={searchRef}
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Ask across your documents…  ( / to focus )"
-              />
-              <button type="submit" disabled={!query.trim() || !!busy}>Search</button>
-            </form>
+          <main className={hasSearched ? undefined : "search-hero-main"}>
+            {hasSearched ? (
+              <form className="q" onSubmit={runSearch}>
+                <input
+                  ref={searchRef}
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Ask across your documents…  ( / to focus )"
+                />
+                <button type="submit" disabled={!query.trim() || !!busy}>Search</button>
+                <button type="button" className="ghost" onClick={clearSearch} title="Clear results and start over">Clear</button>
+              </form>
+            ) : (
+              <div className="hero">
+                <h1 className="hero-greet">{greeting}</h1>
+                <form className="q hero-q" onSubmit={runSearch}>
+                  <input
+                    ref={searchRef}
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Ask across your documents…"
+                    aria-label="Search your documents"
+                  />
+                  <button type="submit" disabled={!query.trim() || !!busy} aria-label="Search">→</button>
+                </form>
+              </div>
+            )}
 
-            <div className="controls">
-              <label className="ctl">
-                <span>MATCHING</span>
-                <select
-                  className="mono"
-                  value={searchMode}
-                  onChange={(e) => changeSetting({ search: e.target.value })}
-                  aria-label="Retrieval matching mode"
-                >
-                  <option value="hybrid">Keywords + meaning</option>
-                  <option value="dense">Meaning only</option>
-                </select>
-              </label>
-              <label className="ctl">
-                <span>ANSWER RANK</span>
-                <select
-                  className="mono"
-                  value={rerankOff ? "off" : "on"}
-                  onChange={(e) => changeSetting({ rerank: e.target.value })}
-                  aria-label="Answer ranking"
-                >
-                  <option value="on">On</option>
-                  <option value="off">Off</option>
-                </select>
-              </label>
-              <label className="ctl">
-                <span>RESULTS</span>
-                <span className="stepper">
-                  <button type="button" onClick={() => setTopK((k) => Math.max(1, k - 1))} aria-label="fewer results">−</button>
-                  <code className="mono">{topK}</code>
-                  <button type="button" onClick={() => setTopK((k) => Math.min(50, k + 1))} aria-label="more results">+</button>
-                </span>
-              </label>
+            <div className="filterbar">
+              <button
+                type="button"
+                className={`filtertoggle mono${activeFilterCount ? " on" : ""}`}
+                onClick={() => setFiltersOpen((o) => !o)}
+                aria-expanded={filtersOpen}
+              >
+                Filters{activeFilterCount ? ` · ${activeFilterCount}` : ""}
+                <span className="arrow">{filtersOpen ? "▾" : "▸"}</span>
+              </button>
+              <div className={`filterpanel${filtersOpen ? " open" : ""}`}>
+                <div className="filterinner">
+                  <div className="filterstrip">
+                    <label className="ctl">
+                      <span>MATCHING</span>
+                      <select
+                        className="mono"
+                        value={searchMode}
+                        onChange={(e) => changeSetting({ search: e.target.value })}
+                        aria-label="Retrieval matching mode"
+                      >
+                        <option value="hybrid">Keywords + meaning</option>
+                        <option value="dense">Meaning only</option>
+                      </select>
+                    </label>
+                    <label className="ctl">
+                      <span>ANSWER RANK</span>
+                      <select
+                        className="mono"
+                        value={rerankOff ? "off" : "on"}
+                        onChange={(e) => changeSetting({ rerank: e.target.value })}
+                        aria-label="Answer ranking"
+                      >
+                        <option value="on">On</option>
+                        <option value="off">Off</option>
+                      </select>
+                    </label>
+                    <label className="ctl">
+                      <span>RESULTS</span>
+                      <span className="stepper">
+                        <button type="button" onClick={() => setTopK((k) => Math.max(1, k - 1))} aria-label="fewer results">−</button>
+                        <code className="mono">{topK}</code>
+                        <button type="button" onClick={() => setTopK((k) => Math.min(50, k + 1))} aria-label="more results">+</button>
+                      </span>
+                    </label>
+                    {sources.length > 0 && (
+                      <label className="ctl">
+                        <span>SOURCE</span>
+                        <select
+                          className="mono"
+                          value={scopeSource}
+                          onChange={(e) => setScopeSource(e.target.value)}
+                          aria-label="Filter by document source"
+                        >
+                          <option value="">All</option>
+                          {sources.map((s) => (
+                            <option key={s} value={s}>{s}</option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                    {tags.length > 0 && (
+                      <span className="chipsgroup" role="group" aria-label="Filter by tag">
+                        {tags.map((t) => (
+                          <button
+                            key={t.tag}
+                            type="button"
+                            className={`chip mono${filterTags.has(t.tag) ? " on" : ""}`}
+                            onClick={() => toggleTag(t.tag)}
+                            title={`${t.count} document(s)`}
+                          >
+                            {t.tag} · {t.count}
+                          </button>
+                        ))}
+                        {filterTags.size > 0 && (
+                          <button type="button" className="chip mono clear" onClick={() => setFilterTags(new Set())}>
+                            Clear
+                          </button>
+                        )}
+                      </span>
+                    )}
+                  </div>
+                  {docs.length > 0 && (
+                    <details className="scope">
+                      <summary className="mono">
+                        SCOPE: {scopeDocs.size ? `${scopeDocs.size} DOC${scopeDocs.size === 1 ? "" : "S"}` : "ALL DOCUMENTS"}
+                      </summary>
+                      <div className="scopelist">
+                        {docs.map((d) => (
+                          <label key={d.doc_id} className="ctl check">
+                            <input
+                              type="checkbox"
+                              checked={scopeDocs.has(d.doc_id)}
+                              onChange={() => toggleScopeDoc(d.doc_id)}
+                            />
+                            <span className="truncate">{d.filename}</span>
+                          </label>
+                        ))}
+                        {scopeDocs.size > 0 && (
+                          <button type="button" onClick={() => setScopeDocs(new Set())}>Clear scope</button>
+                        )}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              </div>
             </div>
 
-            {searched && (
+            {hasSearched && (
               <p className="resultmeta mono">
                 {hits.length} RESULT{hits.length === 1 ? "" : "S"} FOR “{searched}”
+                {filterTags.size > 0 && ` · TAG: ${[...filterTags].join(", ")}`}
+                {scopeSource && ` · SRC: ${scopeSource}`}
+                {scopeDocs.size > 0 && ` · ${scopeDocs.size} DOC${scopeDocs.size === 1 ? "" : "S"}`}
               </p>
             )}
 
@@ -420,8 +719,8 @@ export default function App() {
                 </li>
               ))}
             </ol>
-            {!hits.length && !busy && (
-              <p className="empty">No results yet — ingest files above, then search. Scores and match details appear on each card.</p>
+            {hasSearched && !hits.length && !busy && (
+              <p className="empty">No matches — try different words or fewer filters. Add files from Sources.</p>
             )}
           </main>
         ) : tab === "library" ? (
@@ -455,6 +754,7 @@ export default function App() {
                   <th>File</th>
                   <th>Status</th>
                   <th>Chunks</th>
+                  <th>Tags</th>
                   <th></th>
                 </tr>
               </thead>
@@ -469,12 +769,47 @@ export default function App() {
                         aria-label={`select ${d.filename}`}
                       />
                     </td>
-                    <td className="file">{d.filename}<span className="docid mono">{d.doc_id}</span></td>
+                    <td className="file">{d.filename}<span className="docid mono">{d.doc_id} · {d.source || "upload"}</span></td>
                     <td>
                       <span className={`pill mono ${d.status}`}>{d.status.toUpperCase()}</span>
                       {d.error && <span className="err"> — {d.error}</span>}
                     </td>
                     <td className="mono">{d.chunk_count}</td>
+                    <td className="tagcell">
+                      {editingTags === d.doc_id ? (
+                        <span className="tagedit">
+                          <input
+                            className="mono"
+                            value={tagDraft}
+                            autoFocus
+                            placeholder="comma, separated"
+                            onChange={(e) => setTagDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") saveTags(d.doc_id);
+                              if (e.key === "Escape") setEditingTags(null);
+                            }}
+                            aria-label={`tags for ${d.filename}`}
+                          />
+                          <button onClick={() => saveTags(d.doc_id)}>Save</button>
+                          <button onClick={() => setEditingTags(null)}>✕</button>
+                        </span>
+                      ) : (
+                        <span
+                          className="tagview"
+                          onClick={() => { setEditingTags(d.doc_id); setTagDraft((d.tags ?? []).join(", ")); }}
+                          title="Click to edit tags"
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") { setEditingTags(d.doc_id); setTagDraft((d.tags ?? []).join(", ")); }
+                          }}
+                        >
+                          {(d.tags ?? []).length
+                            ? (d.tags ?? []).map((t) => <span key={t} className="chip mono sm">{t}</span>)
+                            : <span className="mono dim">+ tag</span>}
+                        </span>
+                      )}
+                    </td>
                     <td className="acts">
                       <button onClick={() => doReingest(d.doc_id)}>Re-ingest</button>
                       <button className="danger" onClick={() => doDelete(d.doc_id)}>Delete</button>
@@ -483,7 +818,100 @@ export default function App() {
                 ))}
               </tbody>
             </table>
-            {!docs.length && <p className="empty">Library is empty — drop files above.</p>}
+            {!docs.length && <p className="empty">Library is empty — add files from Sources.</p>}
+          </main>
+        ) : tab === "sources" ? (
+          <main>
+            <div className="resultmeta mono">ADD FILES</div>
+            <section
+              className={`drop tab-sources-drop${drag ? " over" : ""}`}
+              onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+              onDragLeave={() => setDrag(false)}
+              onDrop={(e) => { e.preventDefault(); setDrag(false); handleFiles(e.dataTransfer.files); }}
+              onClick={() => fileRef.current?.click()}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => { if (e.key === "Enter") fileRef.current?.click(); }}
+            >
+              <input
+                ref={fileRef}
+                type="file"
+                multiple
+                hidden
+                onChange={(e) => {
+                  if (e.target.files) handleFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              <strong>{drag ? "DROP TO INGEST" : "DRAG + DROP FILES TO INGEST"}</strong>
+              <span className="mono">{formatHint || "pdf / docx / md / txt"} — or click to browse</span>
+            </section>
+
+            <div className="resultmeta mono">ADD FROM URL</div>
+            <form className="urlform" onSubmit={handleAddUrl}>
+              <input
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                placeholder="https://example.com/article"
+                aria-label="URL to ingest"
+              />
+              <input
+                className="mono"
+                value={urlTags}
+                onChange={(e) => setUrlTags(e.target.value)}
+                placeholder="tags, comma separated"
+                aria-label="Tags for this URL"
+              />
+              <button type="submit" className="primary" disabled={!url.trim() || !!busy}>Add URL</button>
+            </form>
+
+            <div className="resultmeta mono">WATCHED FOLDERS</div>
+            <form className="urlform" onSubmit={handleAddWatch}>
+              <input
+                className="mono"
+                value={watchPath}
+                onChange={(e) => setWatchPath(e.target.value)}
+                placeholder="/absolute/path/to/folder"
+                aria-label="Folder path to watch"
+              />
+              <label className="ctl check">
+                <input
+                  type="checkbox"
+                  checked={watchRecursive}
+                  onChange={(e) => setWatchRecursive(e.target.checked)}
+                />
+                Recursive
+              </label>
+              <button type="submit" disabled={!watchPath.trim() || !!busy}>Watch</button>
+              <button type="button" onClick={handleSyncWatches} disabled={!watches.length || !!busy}>
+                Sync now
+              </button>
+            </form>
+            {lastScan && <p className="side-hint mono">Last scan: {lastScan}</p>}
+            {watches.length > 0 ? (
+              <table className="lib">
+                <thead>
+                  <tr>
+                    <th>Path</th>
+                    <th>Recursive</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {watches.map((w) => (
+                    <tr key={w.id}>
+                      <td className="mono">{w.path}</td>
+                      <td className="mono">{w.recursive ? "yes" : "no"}</td>
+                      <td className="acts">
+                        <button className="danger" onClick={() => handleRemoveWatch(w.id)}>Remove</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="empty">No watched folders. Add one above — new files ingest automatically, edits re-ingest in place, deletions mark docs missing.</p>
+            )}
           </main>
         ) : (
           <main>
@@ -528,15 +956,19 @@ export default function App() {
             <div className="mcptools">
               <div className="mcptool">
                 <code className="mono">procure_search</code>
-                <span>Ask across the library — hybrid BM25 + dense retrieval, reranked by answerability.</span>
+                <span>Ask across the library — hybrid BM25 + dense retrieval, reranked by answerability. Scopes to doc IDs and tags.</span>
               </div>
               <div className="mcptool">
                 <code className="mono">procure_add_text</code>
-                <span>Save transcripts, outputs, notes — chunked, embedded, searchable immediately.</span>
+                <span>Save transcripts, outputs, notes — chunked, embedded, searchable immediately. Accepts tags.</span>
+              </div>
+              <div className="mcptool">
+                <code className="mono">procure_add_url</code>
+                <span>Fetch a web page into the library — article text extracted and searchable immediately.</span>
               </div>
               <div className="mcptool">
                 <code className="mono">procure_list_documents</code>
-                <span>See what is stored — every document with status and chunk counts.</span>
+                <span>See what is stored — every document with status, tags, and chunk counts.</span>
               </div>
               <div className="mcptool">
                 <code className="mono">procure://documents/{"{doc_id}"}</code>
