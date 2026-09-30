@@ -1,6 +1,6 @@
 # procure
 
-Local-first personal library: drop in documents, search them by meaning, and let AI agents use the library too. Fully offline by default — no accounts, no cloud.
+> Local-first personal library: drop in documents, search them by meaning, and let AI agents use the library too. Fully offline by default — no accounts, no cloud. Provides cross agent memory support to share memories amongst your agents
 
 **Download:** [GitHub Releases](https://github.com/whatonlylue/procure/releases) — macOS (`.dmg`, Apple Silicon) and Windows (installer). Builds are unsigned for now: on macOS, right-click → Open on first launch.
 
