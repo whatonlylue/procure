@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-from pathlib import Path
 from typing import Annotated
 
 from mcp.server import MCPServer
@@ -21,11 +20,15 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.service import RAGService
+from app.skills import skill_text
 
 logger = logging.getLogger(__name__)
 
-_GUIDE_PATH = Path(__file__).with_name("mcp_guide.md")
-GUIDE_TEXT = _GUIDE_PATH.read_text(encoding="utf-8") if _GUIDE_PATH.exists() else ""
+try:
+    GUIDE_TEXT = skill_text()
+except FileNotFoundError as e:
+    logger.warning("procure skill not bundled: %s", e)
+    GUIDE_TEXT = ""
 
 
 def _doc_uri(doc_id: str) -> str:
@@ -40,9 +43,11 @@ mcp = MCPServer(
         "procure stores ingested documents as embedded chunks. Use procure_search "
         "to answer questions from the library, procure_list_documents to see what "
         "is stored, and procure_add_text to persist new material (conversation "
-        "transcripts, tool outputs, notes) for future retrieval. Read the "
-        "procure://guide resource for the full usage guide, and fetch any hit's "
-        "complete document via its `uri` (procure://documents/{doc_id})."
+        "transcripts, tool outputs, notes) for future retrieval. Pass "
+        'doc_type="memory" to save or search cross-agent memories; omit it to '
+        "cover everything. Read the procure://guide resource for the full usage "
+        "guide, and fetch any hit's complete document via its `uri` "
+        "(procure://documents/{doc_id})."
     ),
 )
 
@@ -56,6 +61,9 @@ class SearchHit(BaseModel):
     doc_id: str
     filename: str
     text: str
+    doc_type: str = Field(
+        default="document",
+        description='"document" or "memory" (cross-agent memory).')
     score: float = Field(description="Blended final ranking score.")
     sparse_score: float = Field(description="BM25 exact-word match strength.")
     dense_score: float = Field(description="Embedding cosine similarity.")
@@ -74,6 +82,9 @@ class LibraryDoc(BaseModel):
     created_at: str = ""
     tags: list[str] = []
     source: str = ""
+    doc_type: str = Field(
+        default="document",
+        description='"document" or "memory" (cross-agent memory).')
     uri: str = Field(description="Resource URI for the full document text.")
 
 
@@ -83,6 +94,9 @@ class IngestResult(BaseModel):
     status: str
     chunk_count: int = 0
     error: str = ""
+    doc_type: str = Field(
+        default="document",
+        description='"document" or "memory" (cross-agent memory).')
 
 
 _service: RAGService | None = None
@@ -112,19 +126,30 @@ def procure_search(
         list[str] | None,
         Field(description="Optional tags: only chunks from documents carrying ALL of these tags are searched."),
     ] = None,
+    doc_type: Annotated[
+        str | None,
+        Field(description='Optional type filter: "memory" for cross-agent memories only, "document" for files/uploads only, omit for everything.'),
+    ] = None,
 ) -> list[SearchHit]:
-    """Advanced search over the procure library: hybrid BM25 + dense retrieval fused with RRF, then reranked by answerability. Returns matching chunks with filenames, relevance scores, and answerability signals. Use this whenever a question could pertain to stored documents, past conversations, or saved outputs. Each hit's `uri` reads the full document."""
+    """Advanced search over the procure library: hybrid BM25 + dense retrieval fused with RRF, then reranked by answerability. Returns matching chunks with filenames, relevance scores, and answerability signals. Use this whenever a question could pertain to stored documents, past conversations, or saved outputs. Pass doc_type="memory" when the user references previous work. Each hit's `uri` reads the full document."""
     svc = _svc()
-    logger.info("procure_search q=%r top_k=%d doc_ids=%s tags=%s", query[:120], top_k, doc_ids, tags)
+    logger.info("procure_search q=%r top_k=%d doc_ids=%s tags=%s doc_type=%s",
+                query[:120], top_k, doc_ids, tags, doc_type)
     return [SearchHit(**h, uri=_doc_uri(h["doc_id"]))
-            for h in svc.search(query, top_k, doc_ids, tags)]
+            for h in svc.search(query, top_k, doc_ids, tags, None, doc_type)]
 
 
 @mcp.tool(annotations=_READ_ONLY)
-def procure_list_documents() -> list[LibraryDoc]:
-    """List every document in the procure library with status and chunk counts. Use it to discover what is stored before searching, or to get document IDs for scoped search. Each entry's `uri` reads the full document."""
-    docs = [LibraryDoc(**d, uri=_doc_uri(d["doc_id"])) for d in _svc().list_documents()]
-    logger.info("procure_list_documents -> %d docs", len(docs))
+def procure_list_documents(
+    doc_type: Annotated[
+        str | None,
+        Field(description='Optional type filter: "memory" for cross-agent memories only, "document" for files/uploads only, omit for everything.'),
+    ] = None,
+) -> list[LibraryDoc]:
+    """List every document in the procure library with status and chunk counts. Use it to discover what is stored before searching, or to get document IDs for scoped search. Pass doc_type="memory" to browse only agent memories. Each entry's `uri` reads the full document."""
+    docs = [LibraryDoc(**d, uri=_doc_uri(d["doc_id"]))
+            for d in _svc().list_documents(doc_type)]
+    logger.info("procure_list_documents doc_type=%s -> %d docs", doc_type, len(docs))
     return docs
 
 
@@ -134,15 +159,21 @@ def procure_add_text(
     text: Annotated[str, Field(description="Full text to store: conversation transcript, tool output, notes, or document content.")],
     tags: Annotated[
         list[str] | None,
-        Field(description="Optional tags for later filtered search (e.g. ['memory', 'project-x'])."),
+        Field(description="Optional tags for later filtered search (e.g. ['project-x'])."),
     ] = None,
+    doc_type: Annotated[
+        str,
+        Field(description='Document type: "memory" to store a cross-agent memory, "document" (default) for ordinary notes and files.'),
+    ] = "document",
 ) -> IngestResult:
-    """Add new material to the procure library. The text is chunked, embedded, and stored with the given title, and becomes searchable immediately. Use it to persist conversation transcripts, agent outputs, research notes, or any content worth retrieving later."""
-    logger.info("procure_add_text title=%r chars=%d", title[:80], len(text or ""))
+    """Add new material to the procure library. The text is chunked, embedded, and stored with the given title, and becomes searchable immediately. Use it to persist conversation transcripts, agent outputs, research notes, or any content worth retrieving later. Pass doc_type="memory" (title "memory: <topic>") for facts worth keeping across agent sessions."""
+    logger.info("procure_add_text title=%r chars=%d doc_type=%s",
+                title[:80], len(text or ""), doc_type)
     if not (text or "").strip():
         raise ValueError("text must not be empty")
     result = IngestResult(
-        **_svc().ingest_text(title.strip() or "snippet", text, tags or []))
+        **_svc().ingest_text(title.strip() or "snippet", text, tags or [],
+                             doc_type))
     logger.info("procure_add_text -> %s", result)
     return result
 
@@ -154,10 +185,14 @@ def procure_add_url(
         list[str] | None,
         Field(description="Optional tags for later filtered search."),
     ] = None,
+    doc_type: Annotated[
+        str,
+        Field(description='Document type: "memory" to store a cross-agent memory, "document" (default) for ordinary pages.'),
+    ] = "document",
 ) -> IngestResult:
     """Fetch a web page and add its readable text to the procure library. The article text is extracted, chunked, embedded, and searchable immediately. Use it to persist reference pages worth retrieving later."""
-    logger.info("procure_add_url url=%r", url[:120])
-    result = IngestResult(**_svc().ingest_url(url, tags or []))
+    logger.info("procure_add_url url=%r doc_type=%s", url[:120], doc_type)
+    result = IngestResult(**_svc().ingest_url(url, tags or [], doc_type))
     logger.info("procure_add_url -> %s", result)
     return result
 
