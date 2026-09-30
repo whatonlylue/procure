@@ -20,7 +20,14 @@ from app.config import get_settings
 _MAX_LINES = 1000
 
 
-def _server_cmd(settings) -> list[str]:  # noqa: ANN001
+def _project_root() -> str:
+    """Repo root for a source checkout (parent of app/)."""
+    from pathlib import Path
+
+    return str(Path(__file__).resolve().parent.parent)
+
+
+def _server_cmd(settings) -> list[str]:
     """Command line that (re)starts the MCP server in this environment."""
     if getattr(sys, "frozen", False):
         # PyInstaller onefile: re-invoke this binary's mcp-server subcommand.
@@ -28,6 +35,22 @@ def _server_cmd(settings) -> list[str]:  # noqa: ANN001
                 "--host", settings.mcp_host, "--port", str(settings.mcp_port)]
     return [sys.executable, "-u", "-m", "app.mcp_server",
             "--host", settings.mcp_host, "--port", str(settings.mcp_port)]
+
+
+def _server_env() -> dict:
+    """Environment for the MCP subprocess.
+
+    cwd is the data dir (absolute, possibly read-only when frozen), so a
+    plain source checkout needs PYTHONPATH pointed at the project root or
+    `python -m app.mcp_server` fails with "No module named app".
+    """
+    env = dict(os.environ)
+    env["PYTHONUNBUFFERED"] = "1"
+    if not getattr(sys, "frozen", False):
+        root = _project_root()
+        prev = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = root + (os.pathsep + prev if prev else "")
+    return env
 
 
 class MCPManager:
@@ -60,18 +83,19 @@ class MCPManager:
             if self._proc is not None:
                 return self.status()
             settings = get_settings()
-            env = dict(os.environ)
-            env["PYTHONUNBUFFERED"] = "1"
+            env = _server_env()
             # Carry the workspace's current retrieval settings into the
             # subprocess so MCP search matches the UI. (Restart the server
-            # after changing them; local import avoids a service cycle.)
+            # after changing them; local import avoids a service cycle.
+            # Persisted settings.json is the primary channel; env covers
+            # unsaved runtime tweaks.)
             try:
                 from app.service import get_service
 
                 svc_settings = get_service().settings
                 env["PROCURE_SEARCH"] = svc_settings.search_mode
                 env["PROCURE_RERANK"] = svc_settings.rerank
-            except Exception:  # noqa: BLE001 - fall back to ambient env
+            except Exception:  # fall back to ambient env
                 pass
             self._exit_code = None
             os.makedirs(settings.data_dir, exist_ok=True)
