@@ -47,6 +47,7 @@ class SettingsPatch(BaseModel):
 class UrlIngest(BaseModel):
     url: str
     tags: list[str] = []
+    doc_type: str = "document"
 
 
 class TagsPatch(BaseModel):
@@ -56,6 +57,11 @@ class TagsPatch(BaseModel):
 class WatchAdd(BaseModel):
     path: str
     recursive: bool = True
+
+
+class SkillsInstall(BaseModel):
+    force: bool = False
+    targets: list[str] | None = None
 
 
 @app.get("/api/health")
@@ -79,29 +85,43 @@ def health() -> dict:
 
 @app.post("/api/documents/upload")
 async def upload(files: list[UploadFile] = File(...),
-                 background: bool = Query(False, alias="async")) -> dict:
+                 background: bool = Query(False, alias="async"),
+                 doc_type: str = Query("document")) -> dict:
     """Ingest uploaded files. ?async=1 runs as a background job instead."""
+    from app.store import normalize_doc_type
+
+    try:
+        normalize_doc_type(doc_type)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     svc = get_service()
     payload = [(f.filename or "unnamed", await f.read()) for f in files]
     if not background:
-        return {"documents": svc.ingest_files(payload)}
+        return {"documents": svc.ingest_files(payload, doc_type=doc_type)}
     jobs = get_job_manager()
     job = jobs.submit(
         "upload", f"{len(payload)} file(s)",
         lambda h: svc.ingest_files(
-            payload, progress=h.update, cancelled=h.is_cancelled),
+            payload, doc_type=doc_type,
+            progress=h.update, cancelled=h.is_cancelled),
     )
     return {"job": job}
 
 
 @app.post("/api/documents/url")
 def ingest_url(body: UrlIngest) -> dict:
-    return get_service().ingest_url(body.url, body.tags)
+    try:
+        return get_service().ingest_url(body.url, body.tags, body.doc_type)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @app.get("/api/documents")
-def list_documents() -> dict:
-    return {"documents": get_service().list_documents()}
+def list_documents(doc_type: str | None = Query(None)) -> dict:
+    try:
+        return {"documents": get_service().list_documents(doc_type)}
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @app.get("/api/documents/{doc_id}")
@@ -198,8 +218,13 @@ def sync_watches() -> dict:
 def search(q: str = Query(""), top_k: int = Query(_DEFAULT_TOPK, ge=1, le=50),
            doc_id: list[str] | None = Query(None),
            tag: list[str] | None = Query(None),
-           source: str | None = Query(None)) -> dict:
-    return {"query": q, "results": get_service().search(q, top_k, doc_id, tag, source)}
+           source: str | None = Query(None),
+           doc_type: str | None = Query(None)) -> dict:
+    try:
+        return {"query": q, "results": get_service().search(
+            q, top_k, doc_id, tag, source, doc_type)}
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @app.patch("/api/settings")
@@ -228,6 +253,25 @@ def mcp_stop() -> dict:
 @app.get("/api/mcp/logs")
 def mcp_logs(since: int = Query(0, ge=0)) -> dict:
     return get_mcp_manager().logs(since)
+
+
+@app.get("/api/skills/status")
+def skills_status() -> dict:
+    from app import skills
+
+    return skills.status()
+
+
+@app.post("/api/skills/install")
+def skills_install(body: SkillsInstall) -> dict:
+    from app import skills
+
+    try:
+        return skills.install(body.targets, body.force)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except FileNotFoundError as e:
+        raise HTTPException(500, str(e)) from e
 
 
 if os.path.isdir(STATIC_DIR):
