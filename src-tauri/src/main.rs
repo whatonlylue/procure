@@ -92,7 +92,15 @@ fn main() {
                 let parsed =
                     url.parse().map_err(|e| format!("bad sidecar URL {url:?}: {e}"))?;
                 WebviewWindowBuilder::new(&handle, "main", WebviewUrl::External(parsed))
-                    .title("procure")
+                    // Empty title: macOS renders the window title as OS-level
+                    // text in the transparent bar, next to the traffic lights.
+                    .title("")
+                    // Overlay: no title bar, traffic lights float over the
+                    // content (which reserves top-left space in CSS). The
+                    // transparent strip stays natively draggable. Windows
+                    // ignores this and keeps its normal title bar.
+                    .title_bar_style(tauri::TitleBarStyle::Overlay)
+                    .background_color(tauri::window::Color(20, 21, 18, 255))
                     .inner_size(1200.0, 800.0)
                     .min_inner_size(900.0, 600.0)
                     .build()
