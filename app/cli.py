@@ -74,6 +74,16 @@ def _parser() -> argparse.ArgumentParser:
                    default=int(os.environ.get("PROCURE_MCP_PORT", "8001")))
     m.add_argument("--data-dir", default=None,
                    help="same meaning as serve --data-dir")
+
+    k = sub.add_parser("install-skills",
+                       help="copy the procure agent skill into harness skill dirs")
+    k.add_argument("--force", action="store_true",
+                   help="overwrite existing installs (picks up skill updates)")
+    k.add_argument("--targets", default=None,
+                   help="comma-separated target ids (default: all)")
+
+    sub.add_parser("skills-status",
+                   help="show procure skill install state per harness")
     return p
 
 
@@ -124,12 +134,57 @@ def cmd_mcp_server(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_install_skills(args: argparse.Namespace) -> int:
+    from app import skills
+
+    target_ids = ([t for t in (args.targets or "").split(",") if t.strip()]
+                  or None)
+    try:
+        out = skills.install(target_ids, args.force)
+    except (ValueError, FileNotFoundError) as e:
+        print(f"error: {e}")
+        return 1
+    failed = 0
+    for r in out["results"]:
+        if r["action"] == "error":
+            failed += 1
+            print(f"{r['id']}: ERROR {r['detail']} ({r['path']})")
+        elif r["action"] == "skipped":
+            print(f"{r['id']}: skipped ({r['detail']}) — {r['path']}")
+        else:
+            print(f"{r['id']}: {r['action']} — {r['path']}")
+    return 1 if failed else 0
+
+
+def cmd_skills_status(args: argparse.Namespace) -> int:
+    from app import skills
+
+    del args
+    st = skills.status()
+    if not st["source_found"]:
+        print("bundled skill: NOT FOUND")
+    else:
+        print(f"bundled skill: {st['skill']} v{st['version'] or '?'}")
+    for t in st["targets"]:
+        state = "not installed"
+        if t["installed"]:
+            state = f"installed v{t['installed_version'] or '?'}"
+            if t["outdated"]:
+                state += " (update available)"
+        print(f"  {t['id']} [{t['label']}]: {state} — {t['path']}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "serve":
         return cmd_serve(args)
     if args.command == "mcp-server":
         return cmd_mcp_server(args)
+    if args.command == "install-skills":
+        return cmd_install_skills(args)
+    if args.command == "skills-status":
+        return cmd_skills_status(args)
     raise AssertionError(f"unhandled command {args.command}")  # noqa: TRY003
 
 
