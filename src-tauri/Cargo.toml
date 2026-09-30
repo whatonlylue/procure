@@ -1,6 +1,6 @@
 [package]
 name = "procure"
-version = "0.1.0"
+version = "0.2.1"
 description = "procure — local-first personal library (Tauri shell + Python sidecar)"
 edition = "2021"
 rust-version = "1.77"
