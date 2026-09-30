@@ -6,6 +6,7 @@ import {
   Job,
   McpLogLine,
   McpStatus,
+  SkillStatus,
   TagCount,
   WatchFolder,
   addUrl,
@@ -14,6 +15,7 @@ import {
   deleteDoc,
   getJob,
   health as fetchHealth,
+  installSkills,
   listDocs,
   listTags,
   listWatches,
@@ -25,10 +27,12 @@ import {
   removeWatch,
   search,
   setDocTags,
+  skillsStatus,
   syncWatches,
   updateSettings,
   uploadFilesAsync,
 } from "./api";
+import { THEMES, ThemeName, applyTheme, getInitialTheme } from "./theme";
 
 type Tab = "search" | "library" | "sources" | "mcp";
 
@@ -71,6 +75,7 @@ function pickGreeting(): string {
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("search");
+  const [theme, setTheme] = useState<ThemeName>(getInitialTheme);
   const [docs, setDocs] = useState<Doc[]>([]);
   const [tags, setTags] = useState<TagCount[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -86,10 +91,12 @@ export default function App() {
   const [mcp, setMcp] = useState<McpStatus | null>(null);
   const [mcpLines, setMcpLines] = useState<McpLogLine[]>([]);
   const [copied, setCopied] = useState(false);
+  const [skill, setSkill] = useState<SkillStatus | null>(null);
   // Search scope.
   const [filterTags, setFilterTags] = useState<Set<string>>(new Set());
   const [scopeDocs, setScopeDocs] = useState<Set<string>>(new Set());
   const [scopeSource, setScopeSource] = useState("");
+  const [scopeDocType, setScopeDocType] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [greeting] = useState<string>(pickGreeting);
   // Library tag editor.
@@ -134,6 +141,10 @@ export default function App() {
   }, [refresh]);
 
   useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+
+  useEffect(() => {
     return () => {
       if (pollRef.current !== null) window.clearInterval(pollRef.current);
     };
@@ -176,6 +187,16 @@ export default function App() {
     const el = mcpLogRef.current;
     if (el && mcpFollow.current) el.scrollTop = el.scrollHeight;
   }, [mcpLines]);
+
+  // Skill install state, refreshed whenever the MCP tab opens.
+  useEffect(() => {
+    if (tab !== "mcp") return;
+    let alive = true;
+    skillsStatus()
+      .then((s) => { if (alive) setSkill(s); })
+      .catch((e) => { if (alive) setNotice(String(e)); });
+    return () => { alive = false; };
+  }, [tab]);
 
   // Keyboard: "/" or Cmd/Ctrl+K focuses search; 1/2 switch tabs.
   useEffect(() => {
@@ -266,6 +287,7 @@ export default function App() {
         docIds: scopeDocs.size ? [...scopeDocs] : undefined,
         tags: filterTags.size ? [...filterTags] : undefined,
         source: scopeSource || undefined,
+        docType: scopeDocType || undefined,
       });
       setHits(res);
       setSearched(query);
@@ -378,6 +400,26 @@ export default function App() {
     setTimeout(() => setCopied(false), 2000);
   }
 
+  async function doInstallSkill(force: boolean) {
+    if (busy) return;
+    setBusy(force ? "Reinstalling skill…" : "Installing skill…");
+    setNotice("");
+    try {
+      const results = await installSkills(force);
+      const errs = results.filter((r) => r.action === "error");
+      setNotice(
+        errs.length
+          ? `Skill install errors: ${errs.map((r) => `${r.id}: ${r.detail}`).join("; ")}`
+          : `Skill ${results.map((r) => `${r.id} ${r.action}`).join(", ")}.`
+      );
+      setSkill(await skillsStatus());
+    } catch (e) {
+      setNotice(String(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
   function fmtUptime(s: number): string {
     if (s < 60) return `${Math.floor(s)}s`;
     if (s < 3600) return `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`;
@@ -464,7 +506,7 @@ export default function App() {
 
   const ready = docs.filter((d) => d.status === "ready").length;
   const hasSearched = searched !== "";
-  const activeFilterCount = filterTags.size + scopeDocs.size + (scopeSource ? 1 : 0);
+  const activeFilterCount = filterTags.size + scopeDocs.size + (scopeSource ? 1 : 0) + (scopeDocType ? 1 : 0);
   const searchMode = (backend?.search ?? "hybrid").toLowerCase() === "dense" ? "dense" : "hybrid";
   const mode = searchMode === "hybrid" ? "Keywords + meaning" : "Meaning only";
   const rerankOff = ["", "0", "false", "no", "off"].includes((backend?.rerank ?? "on").toLowerCase());
@@ -518,6 +560,23 @@ export default function App() {
           <div title="OCR backend for scanned PDFs and images"><dt>OCR</dt><dd>{backend?.ocr || "off"}</dd></div>
         </dl>
         <p className="side-hint">Matching + ranking can be changed from the Search tab.</p>
+
+        <div className="side-label">THEME</div>
+        <div className="theme-swatches" role="group" aria-label="Color theme">
+          {THEMES.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              className={theme === t.id ? "on" : ""}
+              onClick={() => setTheme(t.id)}
+              aria-pressed={theme === t.id}
+              title={t.blurb}
+            >
+              <span className="swatch" data-swatch={t.id} aria-hidden="true" />
+              {t.label}
+            </button>
+          ))}
+        </div>
 
         <div className="side-foot mono">
           <span>/ focus</span>
@@ -635,6 +694,19 @@ export default function App() {
                         </select>
                       </label>
                     )}
+                    <label className="ctl">
+                      <span>TYPE</span>
+                      <select
+                        className="mono"
+                        value={scopeDocType}
+                        onChange={(e) => setScopeDocType(e.target.value)}
+                        aria-label="Filter by document type"
+                      >
+                        <option value="">All</option>
+                        <option value="document">Documents</option>
+                        <option value="memory">Agent memories</option>
+                      </select>
+                    </label>
                     {tags.length > 0 && (
                       <span className="chipsgroup" role="group" aria-label="Filter by tag">
                         {tags.map((t) => (
@@ -687,6 +759,7 @@ export default function App() {
                 {hits.length} RESULT{hits.length === 1 ? "" : "S"} FOR “{searched}”
                 {filterTags.size > 0 && ` · TAG: ${[...filterTags].join(", ")}`}
                 {scopeSource && ` · SRC: ${scopeSource}`}
+                {scopeDocType && ` · TYPE: ${scopeDocType === "memory" ? "memories" : scopeDocType}`}
                 {scopeDocs.size > 0 && ` · ${scopeDocs.size} DOC${scopeDocs.size === 1 ? "" : "S"}`}
               </p>
             )}
@@ -697,6 +770,9 @@ export default function App() {
                   <div className="hithead">
                     <span className="rank mono">#{i + 1}</span>
                     <span className="file">{h.filename}</span>
+                    {h.doc_type === "memory" && (
+                      <span className="pill mono memory" title="Cross-agent memory">MEMORY</span>
+                    )}
                     <span className="score mono" title="Overall similarity to your query">SIMILARITY <b>{fmt(h.score)}</b></span>
                   </div>
                   <p className="snippet">{h.text}</p>
@@ -769,7 +845,7 @@ export default function App() {
                         aria-label={`select ${d.filename}`}
                       />
                     </td>
-                    <td className="file">{d.filename}<span className="docid mono">{d.doc_id} · {d.source || "upload"}</span></td>
+                    <td className="file">{d.filename}<span className="docid mono">{d.doc_id} · {d.source || "upload"}{(d.doc_type || "document") === "memory" ? " · memory" : ""}</span></td>
                     <td>
                       <span className={`pill mono ${d.status}`}>{d.status.toUpperCase()}</span>
                       {d.error && <span className="err"> — {d.error}</span>}
@@ -956,11 +1032,11 @@ export default function App() {
             <div className="mcptools">
               <div className="mcptool">
                 <code className="mono">procure_search</code>
-                <span>Ask across the library — hybrid BM25 + dense retrieval, reranked by answerability. Scopes to doc IDs and tags.</span>
+                <span>Ask across the library — hybrid BM25 + dense retrieval, reranked by answerability. Scopes to doc IDs, tags, and type (documents vs agent memories).</span>
               </div>
               <div className="mcptool">
                 <code className="mono">procure_add_text</code>
-                <span>Save transcripts, outputs, notes — chunked, embedded, searchable immediately. Accepts tags.</span>
+                <span>Save transcripts, outputs, notes — chunked, embedded, searchable immediately. Accepts tags; pass type memory for cross-agent memories.</span>
               </div>
               <div className="mcptool">
                 <code className="mono">procure_add_url</code>
@@ -976,8 +1052,51 @@ export default function App() {
               </div>
               <div className="mcptool">
                 <code className="mono">procure://guide</code>
-                <span>Agent usage guide — how to search, read documents, and store memories.</span>
+                <span>Agent usage guide — how to search, read documents, and store memories. Same content as the skill below.</span>
               </div>
+            </div>
+
+            <div className="resultmeta mono">AGENT SKILL{skill?.version ? ` · v${skill.version}` : ""}</div>
+            <p className="side-hint">
+              Install the procure skill into your agent harnesses so agents proactively
+              search the library and save memories. Existing installs are left alone;
+              reinstall to pick up skill updates.
+            </p>
+            {skill && (
+              <table className="lib">
+                <thead>
+                  <tr>
+                    <th>Harness</th>
+                    <th>Location</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {skill.targets.map((t) => (
+                    <tr key={t.id}>
+                      <td>{t.label}{t.detected ? "" : <span className="mono dim"> (not detected)</span>}</td>
+                      <td className="mono">{t.path}</td>
+                      <td>
+                        {!t.installed && <span className="mono dim">not installed</span>}
+                        {t.installed && !t.outdated && (
+                          <span className="pill mono ready">v{t.installed_version || "?"}</span>
+                        )}
+                        {t.installed && t.outdated && (
+                          <span className="pill mono missing">v{t.installed_version || "?"} → v{t.bundled_version || "?"}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <div className="mcpbar">
+              <button className="primary" onClick={() => doInstallSkill(false)} disabled={!!busy}>
+                Install skill
+              </button>
+              <button onClick={() => doInstallSkill(true)} disabled={!!busy}>
+                Reinstall
+              </button>
             </div>
 
             <div className="resultmeta mono">SERVER OUTPUT</div>
