@@ -528,7 +528,7 @@ export default function App() {
         <div className="side-brand">
           <span className="logo">P</span>
           <span className="wordmark">procure</span>
-          <span className="ver mono">v0.2.1</span>
+          <span className="ver mono">v0.2.2</span>
         </div>
 
         <div className="side-label">WORKSPACE</div>
