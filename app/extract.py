@@ -49,7 +49,10 @@ def is_supported(filename: str) -> bool:
 
 
 def extract_text(path: str, filename: str, *, ocr_mode: str = "auto") -> str:
-    ext = os.path.splitext(filename.lower())[1]
+    # Display titles (e.g. pasted-text "memory: <topic>") may carry no
+    # extension; the raw copy on disk always does, so fall back to it.
+    ext = (os.path.splitext(filename.lower())[1]
+           or os.path.splitext(path.lower())[1])
     if ext in _TEXT_EXTENSIONS:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             return _strip_boilerplate(f.read())
