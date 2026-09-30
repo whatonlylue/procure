@@ -89,4 +89,8 @@ jobs:
       - name: Attach bundles to release
         uses: softprops/action-gh-release@v2
         with:
-          files: bundles/*
+          # Artifacts preserve their bundle subdir (bundles/dmg/..., bundles/nsis/...),
+          # so match recursively. fail_on_unmatched_files keeps a future
+          # path change from silently publishing an empty release.
+          files: bundles/**/*
+          fail_on_unmatched_files: true
