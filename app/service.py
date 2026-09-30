@@ -1,8 +1,11 @@
 """Ingest pipeline + search orchestration."""
 from __future__ import annotations
 
+import hashlib
 import os
+import urllib.parse
 import uuid
+from collections.abc import Callable
 from functools import lru_cache
 
 from app import chunking, extract
@@ -30,6 +33,13 @@ _RERANK_MIN = 15
 # Final blend: normalized fused retrieval score vs answerability.
 _W_FUSED = 0.5
 _W_ANSWER = 0.5
+
+ProgressCb = Callable[[int, int, str], None]
+CancelCb = Callable[[], bool]
+
+
+def content_hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 class DimensionMismatchError(Exception):
@@ -66,10 +76,31 @@ class RAGService:
             self.sparse.upsert_chunks(ids, [r[1] for r in rows], [r[2] for r in rows])
 
     # -- ingest ---------------------------------------------------------
-    def ingest_files(self, files: list[tuple[str, bytes]]) -> list[dict]:
-        return [self._ingest_one(filename, data) for filename, data in files]
+    def ingest_files(self, files: list[tuple[str, bytes]],
+                     source: str = "upload", source_uri: str = "",
+                     tags: list[str] | None = None,
+                     progress: ProgressCb | None = None,
+                     cancelled: CancelCb | None = None) -> list[dict]:
+        out = []
+        for i, (filename, data) in enumerate(files):
+            if cancelled is not None and cancelled():
+                out.append({"filename": filename, "status": "cancelled"})
+                continue
+            if progress is not None:
+                progress(i, len(files), filename)
+            out.append(self._ingest_one(filename, data, source, source_uri, tags))
+        if progress is not None:
+            progress(len(files), len(files), "")
+        return out
 
-    def _ingest_one(self, filename: str, data: bytes) -> dict:
+    def _ingest_one(self, filename: str, data: bytes, source: str = "upload",
+                    source_uri: str = "", tags: list[str] | None = None) -> dict:
+        digest = content_hash(data)
+        dup = self.meta.get_by_hash(digest)
+        if dup is not None:
+            return {"doc_id": dup["doc_id"], "filename": dup["filename"],
+                    "status": "duplicate", "chunk_count": dup["chunk_count"],
+                    "tags": self.meta.get_tags(dup["doc_id"])}
         doc_id = uuid.uuid4().hex[:12]
         safe = "".join(c if c.isalnum() or c in "._- " else "_" for c in filename).strip() or "file"
         raw_path = os.path.join(self.settings.raw_dir, f"{doc_id}_{safe}")
@@ -79,18 +110,27 @@ class RAGService:
                 raise ValueError(f"Unsupported file type: {filename}")
             with open(raw_path, "wb") as f:
                 f.write(data)
-            text = extract.extract_text(raw_path, filename)
-            return self._commit_text(doc_id, filename, text)
+            text = extract.extract_text(
+                raw_path, filename, ocr_mode=self.settings.ocr_mode)
+            return self._commit_text(doc_id, filename, text, digest,
+                                     source, source_uri, tags)
         except Exception as e:  # noqa: BLE001 - per-file failure must not break batch
             self.meta.upsert(doc_id, filename, "failed", 0, str(e))
             return {"doc_id": doc_id, "filename": filename, "status": "failed", "error": str(e)}
 
-    def ingest_text(self, filename: str, text: str) -> dict:
+    def ingest_text(self, filename: str, text: str,
+                    tags: list[str] | None = None) -> dict:
         """Ingest raw text (agent transcripts, tool outputs, notes) as a document.
 
         Same chunk + embed + store pipeline as file upload; the text is also
         saved under raw_dir so the document stays re-ingestible from Library.
         """
+        digest = content_hash((text or "").encode("utf-8"))
+        dup = self.meta.get_by_hash(digest)
+        if dup is not None:
+            return {"doc_id": dup["doc_id"], "filename": dup["filename"],
+                    "status": "duplicate", "chunk_count": dup["chunk_count"],
+                    "tags": self.meta.get_tags(dup["doc_id"])}
         doc_id = uuid.uuid4().hex[:12]
         safe = "".join(c if c.isalnum() or c in "._- " else "_" for c in filename).strip() or "snippet"
         if os.path.splitext(safe)[1].lower() not in (".txt", ".md", ".markdown"):
@@ -101,13 +141,102 @@ class RAGService:
         try:
             with open(raw_path, "w", encoding="utf-8") as f:
                 f.write(text or "")
-            return self._commit_text(doc_id, filename, text)
+            return self._commit_text(doc_id, filename, text, digest,
+                                     "text", "", tags)
         except Exception as e:  # noqa: BLE001 - surface as failed status
             self.meta.upsert(doc_id, filename, "failed", 0, str(e))
             return {"doc_id": doc_id, "filename": filename,
                     "status": "failed", "error": str(e)}
 
-    def _commit_text(self, doc_id: str, filename: str, text: str) -> dict:
+    def ingest_url(self, url: str, tags: list[str] | None = None) -> dict:
+        """Fetch a URL, extract its article text, and ingest it as a document."""
+        from app.webfetch import fetch_url_text
+
+        url = (url or "").strip()
+        try:
+            title, text = fetch_url_text(url, timeout=self.settings.fetch_timeout)
+        except Exception as e:  # noqa: BLE001 - fetch failure is a failed doc
+            doc_id = uuid.uuid4().hex[:12]
+            self.meta.upsert(doc_id, url or "url", "failed", 0, str(e),
+                             source="url", source_uri=url)
+            return {"doc_id": doc_id, "filename": url, "status": "failed",
+                    "error": str(e)}
+        if not text.strip():
+            doc_id = uuid.uuid4().hex[:12]
+            err = "No readable text found on that page"
+            self.meta.upsert(doc_id, url, "failed", 0, err,
+                             source="url", source_uri=url)
+            return {"doc_id": doc_id, "filename": url, "status": "failed",
+                    "error": err}
+        digest = content_hash(text.encode("utf-8"))
+        dup = self.meta.get_by_hash(digest)
+        if dup is not None:
+            return {"doc_id": dup["doc_id"], "filename": dup["filename"],
+                    "status": "duplicate", "chunk_count": dup["chunk_count"],
+                    "tags": self.meta.get_tags(dup["doc_id"])}
+        parts = urllib.parse.urlparse(url)
+        slug = "".join(c if c.isalnum() or c in "._- " else "_"
+                       for c in (title or parts.netloc)).strip()[:80] or "page"
+        filename = f"{slug}.md"
+        doc_id = uuid.uuid4().hex[:12]
+        raw_path = os.path.join(self.settings.raw_dir, f"{doc_id}_{slug}.md")
+        self.meta.upsert(doc_id, filename, "processing",
+                         source="url", source_uri=url)
+        try:
+            with open(raw_path, "w", encoding="utf-8") as f:
+                f.write(f"# {title}\n\nSource: {url}\n\n{text}")
+            return self._commit_text(doc_id, filename, text, digest,
+                                     "url", url, tags)
+        except Exception as e:  # noqa: BLE001 - surface as failed status
+            self.meta.upsert(doc_id, filename, "failed", 0, str(e),
+                             source="url", source_uri=url)
+            return {"doc_id": doc_id, "filename": filename,
+                    "status": "failed", "error": str(e)}
+
+    def ingest_path(self, path: str, source: str = "watch",
+                    source_uri: str = "") -> dict:
+        """Ingest a file from disk (folder-watch sync)."""
+        with open(path, "rb") as f:
+            data = f.read()
+        return self._ingest_one(os.path.basename(path), data,
+                                source, source_uri or path)
+
+    def update_document_content(self, doc_id: str, data: bytes,
+                                filename: str | None = None) -> dict:
+        """Re-ingest new bytes into an existing doc id (watch updates).
+
+        Preserves tags; refreshes chunks, hash, and the saved raw copy.
+        """
+        doc = self.meta.get(doc_id)
+        if not doc:
+            raise KeyError(doc_id)
+        name = filename or doc["filename"]
+        safe = "".join(c if c.isalnum() or c in "._- " else "_" for c in name).strip() or "file"
+        raw_path = os.path.join(self.settings.raw_dir, f"{doc_id}_{safe}")
+        for old in os.listdir(self.settings.raw_dir):
+            if old.startswith(doc_id + "_") and old != os.path.basename(raw_path):
+                try:
+                    os.remove(os.path.join(self.settings.raw_dir, old))
+                except OSError:
+                    pass
+        with open(raw_path, "wb") as f:
+            f.write(data)
+        try:
+            text = extract.extract_text(
+                raw_path, name, ocr_mode=self.settings.ocr_mode)
+            return self._commit_text(doc_id, name, text, content_hash(data),
+                                     doc.get("source") or "upload",
+                                     doc.get("source_uri") or "",
+                                     self.meta.get_tags(doc_id))
+        except Exception as e:  # noqa: BLE001 - surface as failed status
+            self.meta.upsert(doc_id, name, "failed", 0, str(e))
+            return {"doc_id": doc_id, "filename": name,
+                    "status": "failed", "error": str(e)}
+
+    def _commit_text(self, doc_id: str, filename: str, text: str,
+                     digest: str = "", source: str = "upload",
+                     source_uri: str = "",
+                     tags: list[str] | None = None) -> dict:
         chunks = chunking.split_text(
             text, self.settings.chunk_size, self.settings.chunk_overlap
         )
@@ -117,9 +246,11 @@ class RAGService:
         ids = [f"{doc_id}:{i}" for i in range(len(chunks))]
         self.vectors.upsert(ids, [doc_id] * len(chunks), embs, chunks)
         self.sparse.upsert_chunks(ids, [doc_id] * len(chunks), chunks)
-        self.meta.upsert(doc_id, filename, "ready", len(chunks))
+        self.meta.upsert(doc_id, filename, "ready", len(chunks), "",
+                         digest, source, source_uri)
+        applied = self.meta.set_tags(doc_id, tags or [])
         return {"doc_id": doc_id, "filename": filename, "status": "ready",
-                "chunk_count": len(chunks)}
+                "chunk_count": len(chunks), "tags": applied}
 
     # -- library --------------------------------------------------------
     def list_documents(self) -> list[dict]:
@@ -145,7 +276,7 @@ class RAGService:
         if not text:
             rows = self.vectors.get_by_doc(doc_id)
             text = "\n\n".join(t for _, t in rows if t)
-        return {**doc, "text": text}
+        return {**doc, "tags": self.meta.get_tags(doc_id), "text": text}
 
     def _raw_path(self, doc_id: str) -> str | None:
         try:
@@ -157,6 +288,15 @@ class RAGService:
              if n.startswith(doc_id + "_")),
             None,
         )
+
+    # -- tags -----------------------------------------------------------
+    def set_tags(self, doc_id: str, tags: list[str]) -> dict:
+        if not self.meta.get(doc_id):
+            raise KeyError(doc_id)
+        return {"doc_id": doc_id, "tags": self.meta.set_tags(doc_id, tags)}
+
+    def list_tags(self) -> list[dict]:
+        return self.meta.all_tags()
 
     # -- runtime settings -----------------------------------------------
     def update_settings(self, search: str | None = None,
@@ -193,6 +333,9 @@ class RAGService:
         self.meta.delete(doc_id)
         return True
 
+    def mark_missing(self, doc_id: str, missing: bool) -> None:
+        self.meta.mark_missing(doc_id, missing)
+
     def reingest_document(self, doc_id: str) -> dict:
         doc = self.meta.get(doc_id)
         if not doc:
@@ -204,19 +347,25 @@ class RAGService:
         self.sparse.delete_by_doc(doc_id)
         self.meta.upsert(doc_id, doc["filename"], "processing")
         try:
-            text = extract.extract_text(raw_path, doc["filename"])
+            text = extract.extract_text(
+                raw_path, doc["filename"], ocr_mode=self.settings.ocr_mode)
             chunks = chunking.split_text(
                 text, self.settings.chunk_size, self.settings.chunk_overlap
             )
             if not chunks:
                 raise ValueError("No text extracted")
+            with open(raw_path, "rb") as f:
+                digest = content_hash(f.read())
             embs = self.embedder.embed(chunks)
             ids = [f"{doc_id}:{i}" for i in range(len(chunks))]
             self.vectors.upsert(ids, [doc_id] * len(chunks), embs, chunks)
             self.sparse.upsert_chunks(ids, [doc_id] * len(chunks), chunks)
-            self.meta.upsert(doc_id, doc["filename"], "ready", len(chunks))
+            self.meta.upsert(doc_id, doc["filename"], "ready", len(chunks), "",
+                             digest, doc.get("source") or "upload",
+                             doc.get("source_uri") or "")
+            tags = self.meta.get_tags(doc_id)
             return {"doc_id": doc_id, "filename": doc["filename"],
-                    "status": "ready", "chunk_count": len(chunks)}
+                    "status": "ready", "chunk_count": len(chunks), "tags": tags}
         except Exception as e:  # noqa: BLE001 - surface as failed status
             self.meta.upsert(doc_id, doc["filename"], "failed", 0, str(e))
             return {"doc_id": doc_id, "filename": doc["filename"],
@@ -224,8 +373,14 @@ class RAGService:
 
     # -- search ---------------------------------------------------------
     def search(self, query: str, top_k: int = 5,
-               doc_ids: list[str] | None = None) -> list[dict]:
+               doc_ids: list[str] | None = None,
+               tags: list[str] | None = None,
+               source: str | None = None) -> list[dict]:
         if not query.strip():
+            return []
+        doc_ids = self._resolve_scope(doc_ids, tags, source)
+        # A filter that matches nothing must return nothing (not everything).
+        if (doc_ids is not None) and not doc_ids:
             return []
         hybrid = self.settings.hybrid
         rerank_on = self.settings.rerank_enabled
@@ -306,6 +461,30 @@ class RAGService:
                 "entailment": round(float(entail.get(cid, 0.0)), 4),
             })
         return out
+
+    def _resolve_scope(self, doc_ids: list[str] | None,
+                       tags: list[str] | None,
+                       source: str | None) -> list[str] | None:
+        """Intersect explicit doc ids with tag/source filters.
+
+        Tags are document-level metadata; chunks inherit their document's
+        tags at query time, so tag filtering resolves to a doc-id
+        pre-filter applied to both retrieval channels. Returns None when
+        no filter was given (search everything).
+        """
+        sets: list[set[str]] = []
+        if doc_ids:
+            sets.append(set(doc_ids))
+        if tags:
+            sets.append(set(self.meta.doc_ids_for_tags(tags)))
+        if source:
+            sets.append(set(self.meta.doc_ids_for_source(source.strip().lower())))
+        if not sets:
+            return None
+        out = sets[0]
+        for s in sets[1:]:
+            out &= s
+        return sorted(out)
 
 
 @lru_cache(maxsize=1)
