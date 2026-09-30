@@ -12,7 +12,15 @@ class OpenAIEmbedder:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
-        self.dim: int = len(self.embed(["dimension probe"])[0])
+        # Dimension is probed lazily: construction must not make network
+        # calls (health checks and imports would otherwise hang/fail).
+        self._dim: int | None = None
+
+    @property
+    def dim(self) -> int:
+        if self._dim is None:
+            self._dim = len(self.embed(["dimension probe"])[0])
+        return self._dim
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         out: list[list[float]] = []
