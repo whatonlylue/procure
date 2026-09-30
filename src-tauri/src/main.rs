@@ -1,8 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! procure desktop shell.
 //!
-//! Owns the Python sidecar lifecycle: spawn `procure-sidecar serve` on an
-//! ephemeral port with the OS app-data dir, wait for its `PROCURE_URL=`
+//! Owns the Python sidecar lifecycle: spawn `procure-sidecar serve` on a
+//! stable local port with the OS app-data dir, wait for its `PROCURE_URL=`
 //! announcement on stdout, open the main window on that URL, and kill the
 //! sidecar when the window closes. The UI itself is served by the sidecar,
 //! so this crate intentionally exposes no JS APIs.
@@ -15,6 +15,29 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 struct SidecarState(Mutex<Option<CommandChild>>);
+
+/// Preferred sidecar port for the desktop window.
+///
+/// The UI keeps small persistent state in web storage (greeting rotation,
+/// theme), which is scoped per origin — scheme + host + port. Binding the
+/// sidecar to a stable port keeps the window on one origin across restarts
+/// so that state survives; an ephemeral port would reset it every launch.
+/// Matches `serve --port`'s default and the `devUrl` in tauri.conf.json.
+const PREFERRED_SIDECAR_PORT: u16 = 8000;
+
+/// Pick the port to spawn the sidecar on: the preferred stable port when
+/// it is free, otherwise 0 (ephemeral) so a collision can never prevent
+/// startup. The caller announces the ephemeral fallback.
+fn pick_sidecar_port(preferred: u16) -> u16 {
+    match std::net::TcpListener::bind(("127.0.0.1", preferred)) {
+        Ok(probe) => {
+            // Release immediately so the sidecar can bind it.
+            drop(probe);
+            preferred
+        }
+        Err(_) => 0,
+    }
+}
 
 fn kill_sidecar(app: &AppHandle) {
     if let Some(state) = app.try_state::<SidecarState>() {
@@ -65,6 +88,15 @@ fn main() {
                 std::fs::create_dir_all(&data_dir)
                     .map_err(|e| format!("create {}: {e}", data_dir.display()))?;
 
+                let port = pick_sidecar_port(PREFERRED_SIDECAR_PORT);
+                if port == 0 {
+                    eprintln!(
+                        "procure: port {PREFERRED_SIDECAR_PORT} in use, \
+                         using an ephemeral port; UI preferences will not \
+                         persist this session"
+                    );
+                }
+                let port_arg = port.to_string();
                 let (mut rx, child) = handle
                     .shell()
                     .sidecar("procure-sidecar")
@@ -72,7 +104,7 @@ fn main() {
                     .args([
                         "serve",
                         "--port",
-                        "0",
+                        &port_arg,
                         "--data-dir",
                         &data_dir.to_string_lossy(),
                     ])
@@ -126,4 +158,29 @@ fn main() {
                 kill_sidecar(app);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn keeps_preferred_port_when_free() {
+        // Discover a free port, release it, and expect it back.
+        let free = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        assert_eq!(pick_sidecar_port(free), free);
+    }
+
+    #[test]
+    fn falls_back_to_ephemeral_when_preferred_in_use() {
+        // Hold a port, then expect the ephemeral fallback (0) for it.
+        let held = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = held.local_addr().unwrap().port();
+        assert_eq!(pick_sidecar_port(port), 0);
+    }
 }
