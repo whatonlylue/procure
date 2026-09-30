@@ -15,7 +15,8 @@ Local-first personal library: drop in documents, search them by meaning, and let
 - **Hybrid retrieval** — zero-dependency BM25 sparse scores fused with dense cosine via reciprocal-rank fusion (RRF) [1].
 - **Answerability reranking** — CLEAR-style inference `sigmoid(relevance) + α · entailment`: a local ms-marco cross-encoder plus a frozen DeBERTa-v3 NLI teacher scoring P(chunk entails query), so answer-bearing chunks outrank topical distractors [2]. Degrades gracefully (cross-encoder + term coverage → coverage alone) when models are unavailable. Retrieval mode and rerank toggle at runtime.
 - **Library tab** — per-document status (`ready`/`failed`/`missing`), chunk counts, tags, delete, re-ingest.
-- **MCP server tab** — one click starts a Streamable-HTTP Model Context Protocol server exposing `procure_search` (with tag scope), `procure_add_text`, `procure_add_url`, `procure_list_documents`, plus `procure://documents/{id}` full-text resources — any agent harness can search, read, and write to the library.
+- **MCP server tab** — one click starts a Streamable-HTTP Model Context Protocol server exposing `procure_search` (with tag + type scope), `procure_add_text`, `procure_add_url`, `procure_list_documents`, plus `procure://documents/{id}` full-text resources — any agent harness can search, read, and write to the library.
+- **Cross-agent memories** — documents typed `memory` are shared across agent sessions and harnesses: agents save with `procure_add_text(..., doc_type="memory")` and recall with `procure_search(..., doc_type="memory")` whenever the user references previous work.
 - **Pluggable backends** — embeddings: `hash` (zero-dep) / `sbert` (local neural, recommended) / `openai`; vector stores: `sqlite` / `chroma`. All via env flags.
 
 On a 10-book / 10-query eval, hybrid + CLEAR rerank reaches **9/10 top-1 (MRR 0.950)** with `sbert`, vs 6/10 dense-only.
@@ -39,6 +40,14 @@ Start the server from the MCP tab (or `uv run python -m app.mcp_server --port 80
 Muse mcp add --transport http procure http://127.0.0.1:8001/mcp
 ```
 
+Then install the agent skill so harnesses proactively search the library and save memories — click **Install skill** in the MCP tab, or from source:
+
+```sh
+uv run python -m app.cli install-skills
+```
+
+Claude Code users can instead install the bundled plugin (`/plugin marketplace add whatonlylue/procure`, then `/plugin install procure`), which wires the MCP server and the skill together. The same content is always served live as the `procure://guide` resource.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -60,7 +69,7 @@ Muse mcp add --transport http procure http://127.0.0.1:8001/mcp
 
 ## API (dev)
 
-`GET /api/health` · `POST /api/documents/upload[?async=1]` · `POST /api/documents/url` · `GET /api/documents` (+ `/{id}`) · `PATCH /api/documents/{id}/tags` · `DELETE /api/documents/{id}` (+ `/reingest`) · `GET /api/tags` · `GET /api/search?q=…[&tag=…&source=…&doc_id=…]` · `/api/jobs[/{id}]` · `/api/watch[/{id}|/sync]` · `PATCH /api/settings` · `/api/mcp/{status,start,stop,logs}`
+`GET /api/health` · `POST /api/documents/upload[?async=1]` · `POST /api/documents/url` · `GET /api/documents` (+ `/{id}`) · `PATCH /api/documents/{id}/tags` · `DELETE /api/documents/{id}` (+ `/reingest`) · `GET /api/tags` · `GET /api/search?q=…[&tag=…&source=…&doc_id=…&doc_type=…]` · `/api/jobs[/{id}]` · `/api/watch[/{id}|/sync]` · `PATCH /api/settings` · `/api/mcp/{status,start,stop,logs}` · `/api/skills/{status,install}`
 
 ## License
 
