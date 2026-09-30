@@ -59,7 +59,9 @@ body {
 .side {
   background: var(--bg-soft);
   color: var(--ink);
-  padding: 20px 16px;
+  /* Extra top space clears the floating traffic lights in the desktop
+     build (overlay title bar); harmless in a plain browser. */
+  padding: 38px 16px 20px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -153,7 +155,7 @@ body {
 .side-foot span { border: 1px solid var(--line-soft); padding: 3px 8px; border-radius: var(--radius); }
 
 /* ---- main column ---- */
-.main { padding: 22px 26px 72px; max-width: 960px; width: 100%; }
+.main { padding: 22px 26px 72px; max-width: 960px; width: 100%; margin: 0 auto; }
 
 .drop {
   border: 1px dashed #4a4d45;
@@ -508,6 +510,128 @@ button.primary:hover { background: #f2b13c; border-color: #f2b13c; }
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* ---- tags, scope, sources (v0.2) ---- */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.chip {
+  font-size: 12px;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  background: var(--bg-soft);
+  color: var(--muted);
+}
+.chip:hover { border-color: var(--accent-line); color: var(--ink); background: var(--panel); }
+.chip.on {
+  background: var(--accent-wash);
+  border-color: var(--accent-line);
+  color: var(--accent);
+  font-weight: 600;
+}
+.chip.clear { border-style: dashed; }
+.chip.sm { font-size: 11px; padding: 1px 7px; margin: 1px 4px 1px 0; cursor: default; }
+.chip.sm:hover { background: var(--bg-soft); border-color: var(--line); color: var(--muted); }
+
+.scope { margin-bottom: 14px; border: 1px solid var(--line-soft); border-radius: var(--radius); background: var(--panel); }
+.scope summary { padding: 8px 12px; cursor: pointer; font-size: 12px; color: var(--muted); list-style: none; }
+.scope summary::-webkit-details-marker { display: none; }
+.scope summary::before { content: "+ "; color: var(--accent); }
+.scope[open] summary::before { content: "− "; }
+.scope summary:hover { color: var(--ink); }
+.scopelist { display: flex; flex-direction: column; gap: 4px; padding: 0 12px 12px; max-height: 220px; overflow-y: auto; }
+.scopelist .ctl { font-family: var(--sans); font-size: 13px; }
+.scopelist .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.tagcell { min-width: 140px; max-width: 260px; }
+.tagview { cursor: pointer; display: inline-block; }
+.tagview .dim { color: var(--faint); font-size: 12px; }
+.tagview .dim:hover { color: var(--accent); }
+.tagedit { display: flex; gap: 4px; align-items: center; }
+.tagedit input {
+  width: 150px;
+  padding: 5px 8px;
+  font-size: 12px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  color: var(--ink);
+}
+.tagedit input:focus { outline: none; border-color: var(--accent); }
+.tagedit button { padding: 4px 9px; font-size: 12px; }
+
+.urlform { display: flex; gap: 8px; margin: 10px 0 18px; flex-wrap: wrap; }
+.urlform input {
+  flex: 1;
+  min-width: 200px;
+  padding: 9px 11px;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+  font-family: var(--sans);
+}
+.urlform input.mono { font-family: var(--mono); font-size: 12px; flex: 0 1 220px; min-width: 150px; }
+.urlform input:focus { outline: none; border-color: var(--accent-line); background: var(--panel-2); }
+.urlform input::placeholder { color: var(--faint); }
+
+.pill.missing, .pill.MISSING { background: var(--accent-wash); border-color: var(--accent-line); color: var(--accent); }
+.pill.processing, .pill.PROCESSING { background: var(--bg-soft); border-color: var(--line); color: var(--muted); }
+.pill.duplicate, .pill.DUPLICATE { background: var(--bg-soft); border-color: var(--line); color: var(--muted); }
+
+.progress-row button { padding: 1px 10px; font-size: 11px; }
+
+/* ---- search hero + sideways filters ---- */
+.hero { max-width: 680px; margin: 0 auto; width: 100%; display: flex; flex-direction: column; gap: 16px; }
+.search-hero-main { display: flex; flex-direction: column; justify-content: flex-start; min-height: calc(100vh - 94px); }
+/* Fixed spacer (not flexible centering) so opening the filter panel grows
+   downward instead of shoving the hero upward. */
+.search-hero-main::before { content: ""; flex: none; height: max(40px, calc(50vh - 106px)); }
+.hero-greet { margin: 0; text-align: center; font-size: 24px; font-weight: 600; letter-spacing: -0.01em; }
+.hero-q { margin: 0; }
+.hero-q input { padding: 14px 16px; font-size: 16px; }
+.hero-q button { font-size: 17px; padding: 0 20px; }
+.hero + .filterbar { max-width: 680px; margin-left: auto; margin-right: auto; }
+.filterbar { display: flex; align-items: flex-start; gap: 10px; margin: 16px 0 14px; }
+.filtertoggle { flex: none; font-size: 12px; display: inline-flex; align-items: center; gap: 8px; }
+.filtertoggle .arrow { color: var(--accent); font-size: 11px; }
+.filtertoggle.on { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent); }
+.filterpanel { display: grid; grid-template-columns: 0fr; grid-template-rows: 0fr; transition: grid-template-columns 420ms ease, grid-template-rows 420ms ease, visibility 0s linear 420ms; flex: 1; min-width: 0; visibility: hidden; }
+.filterpanel.open { grid-template-columns: 1fr; grid-template-rows: 1fr; visibility: visible; transition: grid-template-columns 420ms ease, grid-template-rows 420ms ease, visibility 0s; }
+.filterinner {
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  opacity: 0;
+  transform: translateX(-10px) scale(0.98);
+  transform-origin: left center;
+  transition: opacity 320ms ease, transform 420ms ease;
+}
+.filterpanel.open .filterinner { opacity: 1; transform: none; }
+/* Nothing inside may wrap or shrink: the panel must reveal fixed-size
+   content instead of reflowing it mid-animation (the old stutter). */
+.filterinner > * { flex: none; }
+.filterstrip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  padding-bottom: 2px;
+}
+.filterstrip > * { flex: none; }
+.chipsgroup { display: contents; }
+/* Chips lay out through display:contents, so pin them directly. */
+.filterstrip .ctl, .filterstrip .chip { flex: none; }
+.filterinner .scope { margin: 0; }
+.filterinner .scope summary { white-space: nowrap; }
+.q button.ghost { background: var(--panel); border-color: var(--line); color: var(--ink); font-size: 13px; font-weight: 500; }
+.q button.ghost:hover { border-color: #4a4d45; background: var(--panel-2); }
+.tab-sources-drop { margin: 10px 0 18px; }
 
 @media (max-width: 760px) {
   .shell { grid-template-columns: 1fr; }
