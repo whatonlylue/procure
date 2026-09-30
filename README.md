@@ -7,11 +7,15 @@ Local-first personal library: drop in documents, search them by meaning, and let
 ## Features
 
 - **Desktop app** — Tauri shell + Python sidecar that manages its own server; documents live in the OS user-data dir and survive upgrades.
-- **Drag-drop ingest** — pdf / docx / pptx / md / txt → text extraction → sentence-aware ~1000-char chunks (150-char overlap, never split mid-sentence) → embedded + stored.
+- **Broad ingest** — pdf / docx / pptx / xlsx / epub / odt+ods+odp / rtf / csv / json / xml / md / txt and more, all parsed dependency-free → sentence-aware ~1000-char chunks (150-char overlap, never split mid-sentence) → embedded + stored.
+- **Sources** — paste a URL to ingest its article text (trafilatura when installed, readability next, stdlib fallback); watch folders that auto-ingest new files, re-ingest edits in place, and flag deletions as `missing`.
+- **Scanned documents** — thin-page detection routes scanned PDFs and images through optional local OCR (RapidOCR preferred, Tesseract fallback): `uv pip install -e '.[ocr]'`.
+- **Dedup + background jobs** — sha256 content hashing skips re-uploads; uploads and folder syncs run as cancellable background jobs with progress.
+- **Tags + scoped search** — document-level tags inherited by chunks at query time; filter search by tags, source, or an explicit doc set from the Search tab.
 - **Hybrid retrieval** — zero-dependency BM25 sparse scores fused with dense cosine via reciprocal-rank fusion (RRF) [1].
 - **Answerability reranking** — CLEAR-style inference `sigmoid(relevance) + α · entailment`: a local ms-marco cross-encoder plus a frozen DeBERTa-v3 NLI teacher scoring P(chunk entails query), so answer-bearing chunks outrank topical distractors [2]. Degrades gracefully (cross-encoder + term coverage → coverage alone) when models are unavailable. Retrieval mode and rerank toggle at runtime.
-- **Library tab** — per-document status (`ready`/`failed`), chunk counts, delete, re-ingest.
-- **MCP server tab** — one click starts a Streamable-HTTP Model Context Protocol server exposing `procure_search`, `procure_add_text`, `procure_list_documents`, plus `procure://documents/{id}` full-text resources — any agent harness can search, read, and write to the library.
+- **Library tab** — per-document status (`ready`/`failed`/`missing`), chunk counts, tags, delete, re-ingest.
+- **MCP server tab** — one click starts a Streamable-HTTP Model Context Protocol server exposing `procure_search` (with tag scope), `procure_add_text`, `procure_add_url`, `procure_list_documents`, plus `procure://documents/{id}` full-text resources — any agent harness can search, read, and write to the library.
 - **Pluggable backends** — embeddings: `hash` (zero-dep) / `sbert` (local neural, recommended) / `openai`; vector stores: `sqlite` / `chroma`. All via env flags.
 
 On a 10-book / 10-query eval, hybrid + CLEAR rerank reaches **9/10 top-1 (MRR 0.950)** with `sbert`, vs 6/10 dense-only.
@@ -45,6 +49,9 @@ Muse mcp add --transport http procure http://127.0.0.1:8001/mcp
 | `PROCURE_TOPK` | `5` | default hits per query |
 | `PROCURE_CROSS_ENCODER_ALLOW_DOWNLOAD` / `PROCURE_NLI_ALLOW_DOWNLOAD` | `0` | set `1` once to fetch neural models, then stays offline |
 | `PROCURE_DATA_DIR` | `./data` | raw files + databases (desktop app uses the OS user-data dir) |
+| `PROCURE_OCR` | `auto` | `auto` · `on` · `off` — OCR for scanned PDFs/images (needs `[ocr]` extra) |
+| `PROCURE_WATCH_INTERVAL` | `60` | folder-watch poll seconds (`0` disables the loop; manual sync still works) |
+| `PROCURE_FETCH_TIMEOUT` | `20` | URL fetch timeout in seconds |
 
 ## References
 
@@ -53,7 +60,7 @@ Muse mcp add --transport http procure http://127.0.0.1:8001/mcp
 
 ## API (dev)
 
-`GET /api/health` · `POST /api/documents/upload` · `GET /api/documents` (+ `/{id}`) · `PATCH /api/settings` · `DELETE /api/documents/{id}` (+ `/reingest`) · `GET /api/search?q=…` · `/api/mcp/{status,start,stop,logs}`
+`GET /api/health` · `POST /api/documents/upload[?async=1]` · `POST /api/documents/url` · `GET /api/documents` (+ `/{id}`) · `PATCH /api/documents/{id}/tags` · `DELETE /api/documents/{id}` (+ `/reingest`) · `GET /api/tags` · `GET /api/search?q=…[&tag=…&source=…&doc_id=…]` · `/api/jobs[/{id}]` · `/api/watch[/{id}|/sync]` · `PATCH /api/settings` · `/api/mcp/{status,start,stop,logs}`
 
 ## License
 
