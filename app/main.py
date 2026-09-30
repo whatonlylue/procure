@@ -1,26 +1,94 @@
 """FastAPI app: /api/* + static frontend."""
 from __future__ import annotations
 
+import importlib.util
 import os
+import urllib.parse
 from contextlib import asynccontextmanager
+from functools import lru_cache
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 
-from app import extract
+from app import extract, logbuffer
 from app.config import get_settings
 from app.jobs import get_job_manager
 from app.mcp_manager import get_mcp_manager
 from app.ocr import backend_name as ocr_backend
 from app.service import get_service
+from app.version import __version__
 from app.watch import get_watch_manager
+
+# Hosts the workspace server may serve. The UI is same-origin on one of
+# these; anything else is a DNS-rebinding read or a cross-site drive-by
+# write and is rejected (no auth tokens; this is a localhost-only app).
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]", "testserver"}
+
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com data:; "
+    "img-src 'self' data:; "
+    "connect-src 'self' http://127.0.0.1:* http://localhost:*"
+)
+
+
+def _host_ok(host: str) -> bool:
+    return (host or "").split(":")[0].strip("[]").lower() in _LOCAL_HOSTS
+
+
+def _origin_ok(value: str | None) -> bool:
+    if not value or value == "null":
+        return True
+    try:
+        parts = urllib.parse.urlparse(value)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https"):
+        return False
+    return (parts.hostname or "").lower() in _LOCAL_HOSTS
+
+
+class LocalOnlyMiddleware(BaseHTTPMiddleware):
+    """Reject non-localhost Host and cross-site Origin/Referer headers."""
+
+    async def dispatch(self, request, call_next):
+        if not _host_ok(request.headers.get("host", "")):
+            return JSONResponse({"detail": "Forbidden: non-local Host"},
+                                status_code=403)
+        if not _origin_ok(request.headers.get("origin")):
+            return JSONResponse({"detail": "Forbidden: cross-site Origin"},
+                                status_code=403)
+        if not _origin_ok(request.headers.get("referer")):
+            return JSONResponse({"detail": "Forbidden: cross-site Referer"},
+                                status_code=403)
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = _CSP
+        return response
+
+
+@lru_cache(maxsize=8)
+def _have_module(name: str) -> bool:
+    """Import-system probe that executes no module code (cheap, cached)."""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logbuffer.install()
     get_watch_manager().ensure_running()
+    if get_settings().mcp_autostart:
+        try:
+            get_mcp_manager().start()
+        except Exception:  # autostart is best-effort; the tab shows the error
+            pass
     yield
     get_watch_manager().stop()
     get_mcp_manager().stop()
@@ -28,10 +96,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="procure", lifespan=lifespan)
+app.add_middleware(LocalOnlyMiddleware)
 
 _DEFAULT_TOPK = get_settings().top_k
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+INDEX_HTML = os.path.join(STATIC_DIR, "index.html")
+ASSETS_DIR = os.path.join(STATIC_DIR, "assets")
+
+
+def _safe_detail(message: str) -> str:
+    """Redact the absolute data dir from user-facing error details."""
+    data_dir = get_settings().data_dir
+    return str(message).replace(data_dir, "<data-dir>") if data_dir else str(message)
 
 
 class SearchResponse(BaseModel):
@@ -42,6 +119,7 @@ class SearchResponse(BaseModel):
 class SettingsPatch(BaseModel):
     search: str | None = None
     rerank: str | None = None
+    mcp_autostart: bool | None = None
 
 
 class UrlIngest(BaseModel):
@@ -52,6 +130,11 @@ class UrlIngest(BaseModel):
 
 class TagsPatch(BaseModel):
     tags: list[str] = []
+
+
+class MetaPatch(BaseModel):
+    filename: str | None = None
+    doc_type: str | None = None
 
 
 class WatchAdd(BaseModel):
@@ -67,26 +150,35 @@ class SkillsInstall(BaseModel):
 @app.get("/api/health")
 def health() -> dict:
     svc = get_service()
+    neural = _have_module("sentence_transformers") and _have_module("torch")
     return {
         "status": "ok",
+        "version": __version__,
         "embeddings": svc.settings.embeddings,
         "vectordb": svc.settings.vectordb,
         "embed_dim": svc.embedder.dim,
         "chunks": svc.vectors.count(),
-        "documents": len(svc.meta.list()),
+        "documents": svc.meta.count(),
         "search": svc.settings.search_mode,
         "rerank": svc.settings.rerank,
-        "nli_available": svc._nli.available,
-        "alpha_nli": svc.settings.alpha_nli,
+        # Cheap flags only: .available would LOAD the NLI model on first
+        # call, and the frontend polls health after every action.
+        "rerank_backend": "neural" if neural else "heuristic",
+        "rerank_models_loaded": {
+            "cross_encoder": svc._cross.loaded,
+            "nli": svc._nli.loaded,
+        },
+        "mcp_autostart": svc.settings.mcp_autostart,
+        "dense": svc.dimension_status(),
         "ocr": ocr_backend(),
         "formats": sorted(extract.SUPPORTED_EXTENSIONS),
     }
 
 
 @app.post("/api/documents/upload")
-async def upload(files: list[UploadFile] = File(...),
-                 background: bool = Query(False, alias="async"),
-                 doc_type: str = Query("document")) -> dict:
+def upload(files: list[UploadFile] = File(...),
+           background: bool = Query(False, alias="async"),
+           doc_type: str = Query("document")) -> dict:
     """Ingest uploaded files. ?async=1 runs as a background job instead."""
     from app.store import normalize_doc_type
 
@@ -95,7 +187,23 @@ async def upload(files: list[UploadFile] = File(...),
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     svc = get_service()
-    payload = [(f.filename or "unnamed", await f.read()) for f in files]
+    # Chunked read with a per-file cap: never buffer an unbounded upload.
+    limit = max(1, svc.settings.max_upload_mb) * 1024 * 1024
+    payload: list[tuple[str, bytes]] = []
+    for f in files:
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            piece = f.file.read(1024 * 1024)
+            if not piece:
+                break
+            size += len(piece)
+            if size > limit:
+                raise HTTPException(
+                    413, f"{f.filename or 'unnamed'} exceeds the "
+                    f"{svc.settings.max_upload_mb} MB per-file limit")
+            chunks.append(piece)
+        payload.append((f.filename or "unnamed", b"".join(chunks)))
     if not background:
         return {"documents": svc.ingest_files(payload, doc_type=doc_type)}
     jobs = get_job_manager()
@@ -109,19 +217,63 @@ async def upload(files: list[UploadFile] = File(...),
 
 
 @app.post("/api/documents/url")
-def ingest_url(body: UrlIngest) -> dict:
-    try:
-        return get_service().ingest_url(body.url, body.tags, body.doc_type)
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from e
+def ingest_url(body: UrlIngest,
+               background: bool = Query(False, alias="async")) -> dict:
+    if not background:
+        try:
+            return get_service().ingest_url(body.url, body.tags, body.doc_type)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+    svc = get_service()
+    job = get_job_manager().submit(
+        "url", body.url,
+        lambda h: [svc.ingest_url(body.url, body.tags, body.doc_type)],
+    )
+    return {"job": job}
 
 
 @app.get("/api/documents")
-def list_documents(doc_type: str | None = Query(None)) -> dict:
+def list_documents(doc_type: str | None = Query(None),
+                   source: str | None = Query(None),
+                   q: str | None = Query(None),
+                   limit: int | None = Query(None, ge=1, le=500),
+                   offset: int = Query(0, ge=0),
+                   sort: str = Query("newest")) -> dict:
     try:
-        return {"documents": get_service().list_documents(doc_type)}
+        svc = get_service()
+        return {"documents": svc.list_documents(doc_type, source, q,
+                                                limit, offset, sort),
+                "total": svc.count_documents(doc_type, source, q)}
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+
+
+@app.get("/api/documents/export")
+def export_library() -> Response:
+    import json
+
+    body = json.dumps(get_service().export_library(), ensure_ascii=False)
+    return Response(
+        content=body, media_type="application/json",
+        headers={"Content-Disposition":
+                 "attachment; filename=procure-export.json"})
+
+
+@app.post("/api/documents/import")
+async def import_library(file: UploadFile = File(...)) -> dict:
+    import json
+
+    try:
+        payload = json.loads((await file.read()).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as e:
+        raise HTTPException(400, f"Not a procure export file: {e}") from e
+    svc = get_service()
+    job = get_job_manager().submit(
+        "import", file.filename or "import",
+        lambda h: svc.import_library(payload, progress=h.update,
+                                     cancelled=h.is_cancelled),
+    )
+    return {"job": job}
 
 
 @app.get("/api/documents/{doc_id}")
@@ -132,6 +284,19 @@ def get_document(doc_id: str) -> dict:
         raise HTTPException(404, f"Unknown document {doc_id}") from None
 
 
+@app.patch("/api/documents/{doc_id}")
+def patch_document(doc_id: str, body: MetaPatch) -> dict:
+    if body.filename is None and body.doc_type is None:
+        raise HTTPException(400, "Nothing to update: pass filename and/or doc_type")
+    try:
+        return get_service().update_document_meta(
+            doc_id, body.filename, body.doc_type)
+    except KeyError:
+        raise HTTPException(404, f"Unknown document {doc_id}") from None
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @app.delete("/api/documents/{doc_id}")
 def delete_document(doc_id: str) -> dict:
     if not get_service().delete_document(doc_id):
@@ -140,13 +305,23 @@ def delete_document(doc_id: str) -> dict:
 
 
 @app.post("/api/documents/{doc_id}/reingest")
-def reingest_document(doc_id: str) -> dict:
+def reingest_document(doc_id: str,
+                      background: bool = Query(False, alias="async")) -> dict:
+    svc = get_service()
+    if not background:
+        try:
+            return svc.reingest_document(doc_id)
+        except KeyError:
+            raise HTTPException(404, f"Unknown document {doc_id}") from None
+        except FileNotFoundError as e:
+            raise HTTPException(410, _safe_detail(str(e))) from e
     try:
-        return get_service().reingest_document(doc_id)
+        svc.meta.get(doc_id) or (_ for _ in ()).throw(KeyError(doc_id))
     except KeyError:
         raise HTTPException(404, f"Unknown document {doc_id}") from None
-    except FileNotFoundError as e:
-        raise HTTPException(410, str(e)) from e
+    job = get_job_manager().submit(
+        "reingest", doc_id, lambda h: [svc.reingest_document(doc_id)])
+    return {"job": job}
 
 
 @app.patch("/api/documents/{doc_id}/tags")
@@ -198,8 +373,9 @@ def add_watch(body: WatchAdd) -> dict:
 
 
 @app.delete("/api/watch/{watch_id}")
-def remove_watch(watch_id: int) -> dict:
-    if not get_watch_manager().remove(watch_id):
+def remove_watch(watch_id: int,
+                 delete_docs: bool = Query(False)) -> dict:
+    if not get_watch_manager().remove(watch_id, delete_docs):
         raise HTTPException(404, f"Unknown watch {watch_id}")
     return {"removed": watch_id}
 
@@ -219,20 +395,30 @@ def search(q: str = Query(""), top_k: int = Query(_DEFAULT_TOPK, ge=1, le=50),
            doc_id: list[str] | None = Query(None),
            tag: list[str] | None = Query(None),
            source: str | None = Query(None),
-           doc_type: str | None = Query(None)) -> dict:
+           doc_type: str | None = Query(None),
+           since: str | None = Query(None)) -> dict:
     try:
         return {"query": q, "results": get_service().search(
-            q, top_k, doc_id, tag, source, doc_type)}
+            q, top_k, doc_id, tag, source, doc_type, since)}
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
 
 @app.patch("/api/settings")
 def patch_settings(patch: SettingsPatch) -> dict:
+    svc = get_service()
+    out: dict = {}
     try:
-        return get_service().update_settings(patch.search, patch.rerank)
+        if patch.search is not None or patch.rerank is not None:
+            out.update(svc.update_settings(patch.search, patch.rerank))
+        if patch.mcp_autostart is not None:
+            out.update(svc.set_mcp_autostart(patch.mcp_autostart))
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    if not out:
+        raise HTTPException(400, "Nothing to update")
+    out["mcp_autostart"] = svc.settings.mcp_autostart
+    return out
 
 
 @app.get("/api/mcp/status")
@@ -255,6 +441,19 @@ def mcp_logs(since: int = Query(0, ge=0)) -> dict:
     return get_mcp_manager().logs(since)
 
 
+@app.get("/api/mcp/tools")
+def mcp_tools() -> dict:
+    """Tool name + description, single-sourced from the MCP server."""
+    from app import mcp_server
+
+    return {"tools": mcp_server.tool_descriptions()}
+
+
+@app.get("/api/logs")
+def workspace_logs(since: int = Query(0, ge=0)) -> dict:
+    return logbuffer.get_buffer().read(since)
+
+
 @app.get("/api/skills/status")
 def skills_status() -> dict:
     from app import skills
@@ -274,9 +473,18 @@ def skills_install(body: SkillsInstall) -> dict:
         raise HTTPException(500, str(e)) from e
 
 
-if os.path.isdir(STATIC_DIR):
-    app.mount("/assets", StaticFiles(directory=os.path.join(STATIC_DIR, "assets")), name="assets")
+if os.path.isdir(ASSETS_DIR):
+    app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
-    @app.get("/", include_in_schema=False)
-    def index() -> FileResponse:
-        return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    if os.path.isfile(INDEX_HTML):
+        @app.get("/", include_in_schema=False)
+        def index() -> FileResponse:
+            return FileResponse(INDEX_HTML)
+
+        @app.get("/{path:path}", include_in_schema=False)
+        def spa_fallback(path: str):
+            # API routes match before this catch-all; unknown non-API paths
+            # serve the SPA instead of a bare 404.
+            if path.startswith("api/"):
+                raise HTTPException(404, "Not found")
+            return FileResponse(INDEX_HTML)
