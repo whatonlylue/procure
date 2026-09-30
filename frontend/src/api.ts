@@ -9,6 +9,7 @@ export interface Doc {
   source: string;
   source_uri: string;
   content_hash: string;
+  doc_type: string;
 }
 
 export interface TagCount {
@@ -40,6 +41,7 @@ export interface Hit {
   doc_id: string;
   filename: string;
   text: string;
+  doc_type?: string;
   score: number;
   sparse_score?: number;
   dense_score?: number;
@@ -93,6 +95,7 @@ export interface SearchScope {
   docIds?: string[];
   tags?: string[];
   source?: string;
+  docType?: string;
 }
 
 export async function search(q: string, topK: number, scope?: SearchScope): Promise<Hit[]> {
@@ -100,6 +103,7 @@ export async function search(q: string, topK: number, scope?: SearchScope): Prom
   for (const d of scope?.docIds ?? []) p.append("doc_id", d);
   for (const t of scope?.tags ?? []) p.append("tag", t);
   if (scope?.source) p.set("source", scope.source);
+  if (scope?.docType) p.set("doc_type", scope.docType);
   const r = await fetch(`/api/search?${p}`);
   if (!r.ok) throw new Error(`search failed: ${r.status}`);
   return (await r.json()).results;
@@ -236,4 +240,46 @@ export async function mcpLogs(since: number): Promise<{ lines: McpLogLine[]; nex
   const r = await fetch(`/api/mcp/logs?since=${since}`);
   if (!r.ok) throw new Error(`mcp logs failed: ${r.status}`);
   return await r.json();
+}
+
+export interface SkillTargetState {
+  id: string;
+  label: string;
+  path: string;
+  detected: boolean;
+  installed: boolean;
+  installed_version: string;
+  bundled_version: string;
+  outdated: boolean;
+}
+
+export interface SkillStatus {
+  skill: string;
+  source_found: boolean;
+  source_path: string;
+  version: string;
+  targets: SkillTargetState[];
+}
+
+export interface SkillInstallResult {
+  id: string;
+  path: string;
+  action: string;
+  detail: string;
+}
+
+export async function skillsStatus(): Promise<SkillStatus> {
+  const r = await fetch("/api/skills/status");
+  if (!r.ok) throw new Error(`skill status failed: ${r.status}`);
+  return await r.json();
+}
+
+export async function installSkills(force: boolean): Promise<SkillInstallResult[]> {
+  const r = await fetch("/api/skills/install", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ force }),
+  });
+  if (!r.ok) throw new Error(`skill install failed: ${r.status}`);
+  return (await r.json()).results;
 }
