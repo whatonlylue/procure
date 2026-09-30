@@ -1,4 +1,4 @@
-"""Background ingest jobs: uploads, folder syncs, and URL fetches run here.
+"""Background jobs: uploads, folder syncs, and URL/reingest work run here.
 
 Jobs are in-memory (a server restart drops their history, never the
 library itself). Cancellation is cooperative: queued jobs cancel
@@ -59,22 +59,30 @@ class JobManager:
             self._jobs[job_id] = job
             self._handles[job_id] = handle
             self._order.append(job_id)
-            while len(self._order) > _MAX_JOBS:
-                old = self._order.pop(0)
-                if self._jobs.get(old, {}).get("status") in (
-                        "done", "failed", "cancelled"):
-                    self._jobs.pop(old, None)
-                    self._handles.pop(old, None)
-                else:
-                    self._order.append(old)
-                    break
+            self._prune_locked()
             fut = self._pool.submit(self._run, job_id, func, args, kwargs)
             self._futures[job_id] = fut
         return dict(job)
 
+    def _prune_locked(self) -> None:
+        """Drop oldest finished jobs past the cap (active jobs stay put)."""
+        while len(self._order) > _MAX_JOBS:
+            victim = next(
+                (jid for jid in self._order
+                 if self._jobs.get(jid, {}).get("status")
+                 in ("done", "failed", "cancelled")),
+                None,
+            )
+            if victim is None:
+                break  # all active: allow overflow rather than scramble order
+            self._order.remove(victim)
+            self._jobs.pop(victim, None)
+            self._handles.pop(victim, None)
+            self._futures.pop(victim, None)
+
     def _run(self, job_id: str, func, args, kwargs) -> None:
-        handle = self._handles.get(job_id)
         with self._lock:
+            handle = self._handles.get(job_id)
             job = self._jobs.get(job_id)
             if job is None:
                 return
@@ -84,7 +92,7 @@ class JobManager:
             job.update(status="running", updated_at=_now())
         try:
             result = func(handle, *args, **kwargs)
-        except Exception as e:  # noqa: BLE001 - job failure is data
+        except Exception as e:  # job failure is data
             with self._lock:
                 job = self._jobs.get(job_id)
                 if job is not None:
@@ -139,7 +147,8 @@ class JobManager:
 
     def wait(self, job_id: str, timeout: float = 60.0) -> dict | None:
         """Block until a job finishes (tests + scripts)."""
-        fut = self._futures.get(job_id)
+        with self._lock:
+            fut = self._futures.get(job_id)
         if fut is None:
             return self.get(job_id)
         try:
