@@ -15,7 +15,7 @@
 - **Hybrid retrieval** — zero-dependency BM25 sparse scores fused with dense cosine via reciprocal-rank fusion (RRF) [1].
 - **Answerability reranking** — CLEAR-style inference `sigmoid(relevance) + α · entailment`: a local ms-marco cross-encoder plus a frozen DeBERTa-v3 NLI teacher scoring P(chunk entails query), so answer-bearing chunks outrank topical distractors [2]. Degrades gracefully (cross-encoder + term coverage → coverage alone) when models are unavailable. Retrieval mode and rerank toggle at runtime.
 - **Library tab** — per-document status (`ready`/`failed`/`missing`), chunk counts, tags, delete, re-ingest.
-- **MCP server tab** — one click starts a Streamable-HTTP Model Context Protocol server exposing `procure_search` (with tag + type scope), `procure_add_text`, `procure_add_url`, `procure_list_documents`, plus `procure://documents/{id}` full-text resources — any agent harness can search, read, and write to the library.
+- **MCP server tab** — one click starts a Streamable-HTTP Model Context Protocol server exposing `procure_search` (tag + type + source + recency scope), `procure_add_text`, `procure_add_url`, `procure_update_text`, `procure_delete_document`, `procure_list_documents` (paged + filtered), plus `procure://documents/{id}` full-text resources — any agent harness can search, read, write, revise, and delete in the library.
 - **Cross-agent memories** — documents typed `memory` are shared across agent sessions and harnesses: agents save with `procure_add_text(..., doc_type="memory")` and recall with `procure_search(..., doc_type="memory")` whenever the user references previous work.
 - **Pluggable backends** — embeddings: `hash` (zero-dep) / `sbert` (local neural, recommended) / `openai`; vector stores: `sqlite` / `chroma`. All via env flags.
 
@@ -57,10 +57,12 @@ Claude Code users can instead install the bundled plugin (`/plugin marketplace a
 | `PROCURE_SEARCH` / `PROCURE_RERANK` | `hybrid` / `on` | retrieval mode · answerability rerank |
 | `PROCURE_TOPK` | `5` | default hits per query |
 | `PROCURE_CROSS_ENCODER_ALLOW_DOWNLOAD` / `PROCURE_NLI_ALLOW_DOWNLOAD` | `0` | set `1` once to fetch neural models, then stays offline |
-| `PROCURE_DATA_DIR` | `./data` | raw files + databases (desktop app uses the OS user-data dir) |
-| `PROCURE_OCR` | `auto` | `auto` · `on` · `off` — OCR for scanned PDFs/images (needs `[ocr]` extra) |
+| `PROCURE_DATA_DIR` | OS user-data dir | raw files + databases (same default for the app, CLI, and MCP server) |
+| `PROCURE_OCR` | `auto` | `auto` (scanned pages) · `on` (every PDF page) · `off` — OCR for scanned PDFs/images (needs `[ocr]` extra) |
 | `PROCURE_WATCH_INTERVAL` | `60` | folder-watch poll seconds (`0` disables the loop; manual sync still works) |
 | `PROCURE_FETCH_TIMEOUT` | `20` | URL fetch timeout in seconds |
+| `PROCURE_FETCH_ALLOW_PRIVATE` | `0` | set `1` to let URL ingest fetch LAN/private IPs (SSRF guard off) |
+| `PROCURE_MAX_UPLOAD_MB` | `100` | per-file upload cap in megabytes (413 beyond it) |
 
 ## References
 
@@ -69,7 +71,11 @@ Claude Code users can instead install the bundled plugin (`/plugin marketplace a
 
 ## API (dev)
 
-`GET /api/health` · `POST /api/documents/upload[?async=1]` · `POST /api/documents/url` · `GET /api/documents` (+ `/{id}`) · `PATCH /api/documents/{id}/tags` · `DELETE /api/documents/{id}` (+ `/reingest`) · `GET /api/tags` · `GET /api/search?q=…[&tag=…&source=…&doc_id=…&doc_type=…]` · `/api/jobs[/{id}]` · `/api/watch[/{id}|/sync]` · `PATCH /api/settings` · `/api/mcp/{status,start,stop,logs}` · `/api/skills/{status,install}`
+`GET /api/health` · `POST /api/documents/upload[?async=1]` · `POST /api/documents/url[?async=1]` · `GET /api/documents[?q=&source=&doc_type=&sort=&limit=&offset=]` (+ `/{id}`, `PATCH /{id}` for filename/doc_type) · `PATCH /api/documents/{id}/tags` · `DELETE /api/documents/{id}` (+ `/reingest[?async=1]`) · export/import (`GET /api/documents/export`, `POST /api/documents/import`) · `GET /api/tags` · `GET /api/search?q=…[&tag=…&source=…&doc_id=…&doc_type=…&since=…]` · `/api/jobs[/{id}]` · `/api/watch[/{id}|/sync]` · `PATCH /api/settings` · `/api/mcp/{status,start,stop,logs,tools}` · `/api/logs` · `/api/skills/{status,install}`
+
+## CLI (dev)
+
+`procure --version` · `procure serve [--port 8000] [--data-dir …]` · `procure mcp-server` · `procure add <file|url|-> [--tags …] [--doc-type …]` · `procure search <query> [--top-k …]` · `procure list [--query …]` · `procure install-skills` / `skills-status` / `uninstall-skills`
 
 ## License
 
