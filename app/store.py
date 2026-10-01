@@ -343,6 +343,33 @@ class MetaStore:
         with self._session() as c:
             return int(c.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
 
+    def library_version(self) -> dict:
+        """Cheap revision fingerprint for UI polling.
+
+        One connection, two aggregate queries, no vector-store access:
+        external writers (MCP server, watch sync) change the library
+        through upsert/delete/tag writes, and every one of those moves
+        at least one field here (adds/updates bump ``latest`` via the
+        upsert timestamp, deletes move ``documents``, duplicate-ingest
+        tag merges move ``tags``).
+        """
+        with self._session() as c:
+            row = c.execute(
+                "SELECT COUNT(*), COALESCE(SUM(chunk_count), 0), "
+                "MAX(created_at) FROM documents"
+            ).fetchone()
+            trow = c.execute(
+                "SELECT COUNT(*), COALESCE(SUM(LENGTH(tag)), 0) "
+                "FROM doc_tags"
+            ).fetchone()
+        return {
+            "documents": int(row[0]),
+            "chunks": int(row[1]),
+            "latest": row[2] or "",
+            "tags": int(trow[0]),
+            "tag_chars": int(trow[1]),
+        }
+
     def delete(self, doc_id: str) -> bool:
         with self._session() as c:
             c.execute("DELETE FROM doc_tags WHERE doc_id=?", (doc_id,))

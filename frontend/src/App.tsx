@@ -19,6 +19,7 @@ import {
   health as fetchHealth,
   importLibrary,
   installSkills,
+  libraryVersion,
   listDocs,
   listTags,
   listWatches,
@@ -52,6 +53,8 @@ const TABS: { id: Tab; label: string; key: string }[] = [
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp"]);
 const LIB_PAGE_SIZE = 50;
+// Cheap revision poll: two aggregate SQLite queries, no vector access.
+const LIB_VERSION_POLL_MS = 5000;
 const SCOPE_FETCH_MAX = 500;
 const SCOPE_RENDER_MAX = 200;
 
@@ -178,17 +181,22 @@ export default function App() {
   const mcpFollow = useRef(true);
   const wsFollow = useRef(true);
   const pollRef = useRef<number | null>(null);
+  const libVersion = useRef<string | null>(null);
+  const refreshing = useRef(false);
 
   const refresh = useCallback(async () => {
+    refreshing.current = true;
     try {
-      const [lib, scope, h, m, t, w] = await Promise.all([
+      const [lib, scope, h, m, t, w, v] = await Promise.all([
         listDocs({ query: libQuery || undefined, sort: libSort, docType: libType || undefined, limit: LIB_PAGE_SIZE, offset: libPage * LIB_PAGE_SIZE }),
         listDocs({ limit: SCOPE_FETCH_MAX, sort: "newest" }),
         fetchHealth(),
         mcpStatus(),
         listTags(),
         listWatches(),
+        libraryVersion(),
       ]);
+      libVersion.current = JSON.stringify(v);
       setDocs(lib.documents);
       setDocsTotal(lib.total);
       setScopeList(scope.documents);
@@ -210,12 +218,58 @@ export default function App() {
       setScopeSource((prev) => (prev && !sources.has(prev) ? "" : prev));
     } catch (e) {
       setNotice(String(e));
+    } finally {
+      refreshing.current = false;
     }
   }, [libQuery, libSort, libType, libPage]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  // External writers (MCP server memories, watch sync) bypass the UI, so
+  // poll the cheap version fingerprint and reload only when it moves.
+  // Failures stay silent: the next tick retries, and a failed reload
+  // already surfaces through refresh()'s own notice.
+  const checkVersion = useCallback(async () => {
+    if (document.visibilityState === "hidden" || refreshing.current) return;
+    let key: string;
+    try {
+      key = JSON.stringify(await libraryVersion());
+    } catch {
+      return;
+    }
+    if (libVersion.current === null) {
+      libVersion.current = key;
+      return;
+    }
+    if (key !== libVersion.current) {
+      // refresh() records the post-reload fingerprint itself.
+      await refreshRef.current();
+    }
+  }, []);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void checkVersion();
+    }, LIB_VERSION_POLL_MS);
+    const onFocus = () => {
+      void checkVersion();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [checkVersion]);
+
+  // Re-check as soon as the Library tab opens.
+  useEffect(() => {
+    if (tab === "library") void checkVersion();
+  }, [tab, checkVersion]);
 
   useEffect(() => {
     applyTheme(theme);

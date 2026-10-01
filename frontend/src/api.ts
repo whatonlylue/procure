@@ -109,6 +109,18 @@ export interface DocList {
   total: number;
 }
 
+export interface LibraryVersion {
+  documents: number;
+  chunks: number;
+  latest: string;
+  tags: number;
+  tag_chars: number;
+}
+
+export async function libraryVersion(): Promise<LibraryVersion> {
+  return req<LibraryVersion>("/api/library/version");
+}
+
 export interface ListOpts {
   docType?: string;
   source?: string;

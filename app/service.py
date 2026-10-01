@@ -394,6 +394,10 @@ class RAGService:
                         query: str | None = None) -> int:
         return self.meta.count_matching(doc_type, source, query)
 
+    def library_version(self) -> dict:
+        """Cheap revision fingerprint; never touches the vector stores."""
+        return self.meta.library_version()
+
     def get_document(self, doc_id: str) -> dict:
         """Full document record: metadata plus complete extracted text.
 

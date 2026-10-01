@@ -248,6 +248,18 @@ def list_documents(doc_type: str | None = Query(None),
         raise HTTPException(400, str(e)) from e
 
 
+@app.get("/api/library/version")
+def library_version() -> dict:
+    """Cheap revision fingerprint for UI polling.
+
+    Two aggregate SQLite queries, no vector-store access: the library
+    tab polls this every few seconds and reloads only when it moves,
+    so writes from the MCP server (or any other process sharing the
+    data dir) show up without a manual refresh.
+    """
+    return get_service().library_version()
+
+
 @app.get("/api/documents/export")
 def export_library() -> Response:
     import json
