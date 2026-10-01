@@ -23,6 +23,9 @@ readability = ["readability-lxml>=0.8"]
 dev = ["pyinstaller>=6"]
 all = ["sentence-transformers>=3.0", "chromadb>=0.5", "rapidocr-onnxruntime>=1.0", "pymupdf>=1.24", "pillow>=10", "trafilatura>=1.0", "readability-lxml>=0.8"]
 
+[project.scripts]
+procli = "app.cli:main"
+
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
