@@ -222,6 +222,7 @@ body {
 .side-meta dd { margin: 0; font-weight: 600; color: var(--ink); }
 
 .side-hint { font-size: 12px; color: var(--faint); margin: 0; }
+.warn { font-size: 11px; color: var(--danger); border: 1px solid rgba(242, 109, 95, 0.45); background: var(--danger-wash); padding: 6px 9px; border-radius: var(--radius); margin: 0; }
 .side-foot {
   margin-top: auto;
   display: flex;
@@ -325,6 +326,7 @@ body {
 }
 .q input::placeholder { color: var(--faint); }
 .q input:focus { outline: none; border-color: var(--accent-line); background: var(--panel-2); }
+.q input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 button {
   border: 1px solid var(--line);
@@ -350,12 +352,6 @@ button:disabled { opacity: 0.45; cursor: default; }
 }
 .q button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 
-.controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 14px;
-}
 .ctl {
   display: flex;
   align-items: center;
@@ -502,8 +498,6 @@ button:disabled { opacity: 0.45; cursor: default; }
   border-color: rgba(76, 195, 138, 0.4);
   font-weight: 600;
 }
-.docline { font-size: 10px; color: var(--faint); margin-top: 7px; word-break: break-all; }
-
 .empty { color: var(--muted); border: 1px dashed var(--dash); padding: 16px; border-radius: var(--radius); background: var(--bg-soft); }
 
 .libbar {
@@ -546,8 +540,8 @@ button:disabled { opacity: 0.45; cursor: default; }
   margin-right: 6px;
   vertical-align: 1px;
 }
-.pill.ready, .pill.READY { background: var(--ok-wash); border-color: rgba(76, 195, 138, 0.4); color: var(--ok); }
-.pill.failed, .pill.FAILED { background: var(--danger-wash); border-color: rgba(242, 109, 95, 0.4); color: var(--danger); }
+.pill.ready { background: var(--ok-wash); border-color: rgba(76, 195, 138, 0.4); color: var(--ok); }
+.pill.failed { background: var(--danger-wash); border-color: rgba(242, 109, 95, 0.4); color: var(--danger); }
 .err { color: var(--danger); font-size: 12px; }
 .acts { white-space: nowrap; text-align: right; }
 .acts button { margin-left: 6px; }
@@ -585,6 +579,7 @@ button.primary:hover { background: var(--accent-hover); border-color: var(--acce
   color: var(--accent);
 }
 .mcpurl input:focus { outline: none; border-color: var(--accent-line); }
+.mcpurl input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .mcptools {
   display: flex;
   flex-direction: column;
@@ -602,6 +597,12 @@ button.primary:hover { background: var(--accent-hover); border-color: var(--acce
   color: var(--ink-dim);
 }
 .mcptool + .mcptool { border-top: 1px solid var(--line-soft); }
+.mcptools summary { padding: 8px 12px; cursor: pointer; font-size: 12px; color: var(--muted); list-style: none; }
+.mcptools summary::-webkit-details-marker { display: none; }
+.mcptools summary::before { content: "+ "; color: var(--accent); }
+.mcptools[open] summary::before { content: "− "; }
+.mcptools summary:hover { color: var(--ink); }
+.mcptools[open] summary { border-bottom: 1px solid var(--line-soft); }
 .mcptool code {
   flex: none;
   font-size: 12px;
@@ -627,13 +628,14 @@ button.primary:hover { background: var(--accent-hover); border-color: var(--acce
 }
 
 /* ---- tags, scope, sources (v0.2) ---- */
-.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .chip {
   font-size: 12px;
   padding: 3px 10px;
   border: 1px solid var(--line);
   background: var(--bg-soft);
   color: var(--muted);
+  display: inline-block;
+  white-space: nowrap;
 }
 .chip:hover { border-color: var(--accent-line); color: var(--ink); background: var(--panel); }
 .chip.on {
@@ -655,8 +657,12 @@ button.primary:hover { background: var(--accent-hover); border-color: var(--acce
 .scopelist { display: flex; flex-direction: column; gap: 4px; padding: 0 12px 12px; max-height: 220px; overflow-y: auto; }
 .scopelist .ctl { font-family: var(--sans); font-size: 13px; }
 .scopelist .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.taglist { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 12px; max-height: 180px; overflow-y: auto; }
+.taglist .chip { flex: none; }
 
 .tagcell { min-width: 140px; max-width: 260px; }
+/* Long tags truncate instead of overflowing now that chips never wrap. */
+.tagcell .chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 .tagview { cursor: pointer; display: inline-block; }
 .tagview .dim { color: var(--faint); font-size: 12px; }
 .tagview .dim:hover { color: var(--accent); }
@@ -671,6 +677,7 @@ button.primary:hover { background: var(--accent-hover); border-color: var(--acce
   color: var(--ink);
 }
 .tagedit input:focus { outline: none; border-color: var(--accent); }
+.tagedit input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .tagedit button { padding: 4px 9px; font-size: 12px; }
 
 .urlform { display: flex; gap: 8px; margin: 10px 0 18px; flex-wrap: wrap; }
@@ -687,11 +694,14 @@ button.primary:hover { background: var(--accent-hover); border-color: var(--acce
 }
 .urlform input.mono { font-family: var(--mono); font-size: 12px; flex: 0 1 220px; min-width: 150px; }
 .urlform input:focus { outline: none; border-color: var(--accent-line); background: var(--panel-2); }
+.urlform input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.libbar input:focus-visible, .scopelist input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .urlform input::placeholder { color: var(--faint); }
 
-.pill.missing, .pill.MISSING { background: var(--accent-wash); border-color: var(--accent-line); color: var(--accent); }
-.pill.processing, .pill.PROCESSING { background: var(--bg-soft); border-color: var(--line); color: var(--muted); }
-.pill.duplicate, .pill.DUPLICATE { background: var(--bg-soft); border-color: var(--line); color: var(--muted); }
+.pill.missing { background: var(--accent-wash); border-color: var(--accent-line); color: var(--accent); }
+.pill.memory { background: var(--accent-wash); border-color: var(--accent-line); color: var(--accent); }
+.pill.processing { background: var(--bg-soft); border-color: var(--line); color: var(--muted); }
+.pill.duplicate { background: var(--bg-soft); border-color: var(--line); color: var(--muted); }
 
 .progress-row button { padding: 1px 10px; font-size: 11px; }
 
@@ -739,9 +749,6 @@ button.primary:hover { background: var(--accent-hover); border-color: var(--acce
   padding-bottom: 2px;
 }
 .filterstrip > * { flex: none; }
-.chipsgroup { display: contents; }
-/* Chips lay out through display:contents, so pin them directly. */
-.filterstrip .ctl, .filterstrip .chip { flex: none; }
 .filterinner .scope { margin: 0; }
 .filterinner .scope summary { white-space: nowrap; }
 .q button.ghost { background: var(--panel); border-color: var(--line); color: var(--ink); font-size: 13px; font-weight: 500; }
