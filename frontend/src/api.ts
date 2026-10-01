@@ -34,6 +34,9 @@ export interface WatchFolder {
   path: string;
   recursive: number;
   created_at: string;
+  last_sync: string;
+  last_error: string;
+  file_count: number;
 }
 
 export interface Hit {
@@ -50,8 +53,16 @@ export interface Hit {
   entailment?: number;
 }
 
+export interface DenseStatus {
+  stored_dim: number | null;
+  embed_dim: number | null;
+  dense_ok: boolean;
+  warning: string;
+}
+
 export interface Health {
   status: string;
+  version: string;
   embeddings: string;
   vectordb: string;
   embed_dim: number;
@@ -59,36 +70,84 @@ export interface Health {
   documents: number;
   search: string;
   rerank: string;
-  nli_available?: boolean;
-  alpha_nli?: number;
+  rerank_backend?: string;
+  rerank_models_loaded?: { cross_encoder: boolean; nli: boolean };
+  mcp_autostart?: boolean;
+  dense?: DenseStatus;
   ocr?: string;
   formats?: string[];
 }
 
-export async function uploadFiles(files: File[]): Promise<Doc[]> {
-  const fd = new FormData();
-  for (const f of files) fd.append("files", f);
-  const r = await fetch("/api/documents/upload", { method: "POST", body: fd });
-  if (!r.ok) throw new Error(`upload failed: ${r.status}`);
-  const j = await r.json();
-  return j.documents;
+/** Shared fetch: same method/parse/error shape for every endpoint, and the
+ * server's JSON detail (e.g. conversion guidance) reaches the user instead
+ * of a bare status code. */
+async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const r = await fetch(path, init);
+  if (!r.ok) {
+    let detail = "";
+    try {
+      const j = await r.json();
+      detail = typeof j?.detail === "string" ? j.detail : JSON.stringify(j);
+    } catch {
+      detail = await r.text().catch(() => "");
+    }
+    throw new Error(detail || `request failed: ${r.status}`);
+  }
+  return (await r.json()) as T;
 }
 
-export async function listDocs(): Promise<Doc[]> {
-  const r = await fetch("/api/documents");
-  if (!r.ok) throw new Error(`list failed: ${r.status}`);
-  return (await r.json()).documents;
+function json(body: unknown): RequestInit {
+  return {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  };
+}
+
+export interface DocList {
+  documents: Doc[];
+  total: number;
+}
+
+export interface ListOpts {
+  docType?: string;
+  source?: string;
+  query?: string;
+  limit?: number;
+  offset?: number;
+  sort?: string;
+}
+
+export async function listDocs(opts?: ListOpts): Promise<DocList> {
+  const p = new URLSearchParams();
+  if (opts?.docType) p.set("doc_type", opts.docType);
+  if (opts?.source) p.set("source", opts.source);
+  if (opts?.query) p.set("q", opts.query);
+  if (opts?.limit !== undefined) p.set("limit", String(opts.limit));
+  if (opts?.offset) p.set("offset", String(opts.offset));
+  if (opts?.sort) p.set("sort", opts.sort);
+  const q = p.toString();
+  return req<DocList>(`/api/documents${q ? `?${q}` : ""}`);
 }
 
 export async function deleteDoc(docId: string): Promise<void> {
-  const r = await fetch(`/api/documents/${docId}`, { method: "DELETE" });
-  if (!r.ok) throw new Error(`delete failed: ${r.status}`);
+  await req(`/api/documents/${docId}`, { method: "DELETE" });
 }
 
-export async function reingestDoc(docId: string): Promise<Doc> {
-  const r = await fetch(`/api/documents/${docId}/reingest`, { method: "POST" });
-  if (!r.ok) throw new Error(`reingest failed: ${r.status}`);
-  return await r.json();
+export async function reingestDoc(docId: string, background = false): Promise<Doc | Job> {
+  if (!background) return req<Doc>(`/api/documents/${docId}/reingest`, { method: "POST" });
+  return req<{ job: Job }>(`/api/documents/${docId}/reingest?async=1`, { method: "POST" }).then((j) => j.job);
+}
+
+export async function patchDoc(
+  docId: string,
+  patch: { filename?: string; doc_type?: string }
+): Promise<Doc> {
+  return req<Doc>(`/api/documents/${docId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
 }
 
 export interface SearchScope {
@@ -96,6 +155,7 @@ export interface SearchScope {
   tags?: string[];
   source?: string;
   docType?: string;
+  since?: string;
 }
 
 export async function search(q: string, topK: number, scope?: SearchScope): Promise<Hit[]> {
@@ -104,105 +164,99 @@ export async function search(q: string, topK: number, scope?: SearchScope): Prom
   for (const t of scope?.tags ?? []) p.append("tag", t);
   if (scope?.source) p.set("source", scope.source);
   if (scope?.docType) p.set("doc_type", scope.docType);
-  const r = await fetch(`/api/search?${p}`);
-  if (!r.ok) throw new Error(`search failed: ${r.status}`);
-  return (await r.json()).results;
+  if (scope?.since) p.set("since", scope.since);
+  return req<{ results: Hit[] }>(`/api/search?${p}`).then((j) => j.results);
 }
 
-export async function uploadFilesAsync(files: File[]): Promise<Job> {
+export async function uploadFilesAsync(files: File[], docType?: string): Promise<Job> {
   const fd = new FormData();
   for (const f of files) fd.append("files", f);
-  const r = await fetch("/api/documents/upload?async=1", { method: "POST", body: fd });
-  if (!r.ok) throw new Error(`upload failed: ${r.status}`);
-  return (await r.json()).job;
+  const q = docType ? `?async=1&doc_type=${encodeURIComponent(docType)}` : "?async=1";
+  return req<{ job: Job }>(`/api/documents/upload${q}`, { method: "POST", body: fd }).then((j) => j.job);
 }
 
 export async function getJob(jobId: string): Promise<Job> {
-  const r = await fetch(`/api/jobs/${jobId}`);
-  if (!r.ok) throw new Error(`job failed: ${r.status}`);
-  return await r.json();
+  return req<Job>(`/api/jobs/${jobId}`);
 }
 
 export async function cancelJob(jobId: string): Promise<Job> {
-  const r = await fetch(`/api/jobs/${jobId}`, { method: "DELETE" });
-  if (!r.ok) throw new Error(`cancel failed: ${r.status}`);
-  return await r.json();
+  return req<Job>(`/api/jobs/${jobId}`, { method: "DELETE" });
 }
 
-export async function addUrl(url: string, tags: string[]): Promise<Doc> {
-  const r = await fetch("/api/documents/url", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url, tags }),
-  });
-  if (!r.ok) throw new Error(`add URL failed: ${r.status}`);
-  return await r.json();
+export async function addUrl(url: string, tags: string[], docType?: string): Promise<Doc> {
+  return req<Doc>(
+    "/api/documents/url",
+    json({ url, tags, doc_type: docType || "document" })
+  );
+}
+
+export async function exportLibrary(): Promise<Blob> {
+  const r = await fetch("/api/documents/export");
+  if (!r.ok) throw new Error(`export failed: ${r.status}`);
+  return await r.blob();
+}
+
+export async function importLibrary(file: File): Promise<Job> {
+  const fd = new FormData();
+  fd.append("file", file);
+  return req<{ job: Job }>("/api/documents/import", { method: "POST", body: fd }).then((j) => j.job);
 }
 
 export async function setDocTags(docId: string, tags: string[]): Promise<{ doc_id: string; tags: string[] }> {
-  const r = await fetch(`/api/documents/${docId}/tags`, {
+  return req(`/api/documents/${docId}/tags`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ tags }),
   });
-  if (!r.ok) throw new Error(`tags failed: ${r.status}`);
-  return await r.json();
 }
 
 export async function listTags(): Promise<TagCount[]> {
-  const r = await fetch("/api/tags");
-  if (!r.ok) throw new Error(`tags failed: ${r.status}`);
-  return (await r.json()).tags;
+  return req<{ tags: TagCount[] }>("/api/tags").then((j) => j.tags);
 }
 
 export async function listWatches(): Promise<{ folders: WatchFolder[]; last_scan: string | null }> {
-  const r = await fetch("/api/watch");
-  if (!r.ok) throw new Error(`watch list failed: ${r.status}`);
-  return await r.json();
+  return req("/api/watch");
 }
 
 export async function addWatch(path: string, recursive: boolean): Promise<WatchFolder> {
-  const r = await fetch("/api/watch", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, recursive }),
-  });
-  if (!r.ok) throw new Error(`add watch failed: ${r.status} — is it a directory on the server?`);
-  return await r.json();
+  try {
+    return await req<WatchFolder>("/api/watch", json({ path, recursive }));
+  } catch (e) {
+    throw new Error(`${String(e)} — is it a directory on the server?`);
+  }
 }
 
-export async function removeWatch(id: number): Promise<void> {
-  const r = await fetch(`/api/watch/${id}`, { method: "DELETE" });
-  if (!r.ok) throw new Error(`remove watch failed: ${r.status}`);
+export async function removeWatch(id: number, deleteDocs = false): Promise<void> {
+  await req(`/api/watch/${id}${deleteDocs ? "?delete_docs=true" : ""}`, { method: "DELETE" });
 }
 
 export async function syncWatches(): Promise<Job> {
-  const r = await fetch("/api/watch/sync", { method: "POST" });
-  if (!r.ok) throw new Error(`sync failed: ${r.status}`);
-  return (await r.json()).job;
+  return req<{ job: Job }>("/api/watch/sync", { method: "POST" }).then((j) => j.job);
 }
 
 export interface SettingsState {
   search: string;
   rerank: string;
+  mcp_autostart: boolean;
+}
+
+// Backend truthy parsing lives server-side; the UI only needs the two states.
+export function rerankIsOff(rerank: string | undefined): boolean {
+  return (rerank ?? "on").toLowerCase() !== "on";
 }
 
 export async function updateSettings(
   patch: Partial<SettingsState>
 ): Promise<SettingsState> {
-  const r = await fetch("/api/settings", {
+  return req<SettingsState>("/api/settings", {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
   });
-  if (!r.ok) throw new Error(`settings failed: ${r.status}`);
-  return await r.json();
 }
 
 export async function health(): Promise<Health> {
-  const r = await fetch("/api/health");
-  if (!r.ok) throw new Error(`health failed: ${r.status}`);
-  return await r.json();
+  return req<Health>("/api/health");
 }
 
 export interface McpStatus {
@@ -219,27 +273,32 @@ export interface McpLogLine {
 }
 
 export async function mcpStatus(): Promise<McpStatus> {
-  const r = await fetch("/api/mcp/status");
-  if (!r.ok) throw new Error(`mcp status failed: ${r.status}`);
-  return await r.json();
+  return req<McpStatus>("/api/mcp/status");
 }
 
 export async function mcpStart(): Promise<McpStatus> {
-  const r = await fetch("/api/mcp/start", { method: "POST" });
-  if (!r.ok) throw new Error(`mcp start failed: ${r.status}`);
-  return await r.json();
+  return req<McpStatus>("/api/mcp/start", { method: "POST" });
 }
 
 export async function mcpStop(): Promise<McpStatus> {
-  const r = await fetch("/api/mcp/stop", { method: "POST" });
-  if (!r.ok) throw new Error(`mcp stop failed: ${r.status}`);
-  return await r.json();
+  return req<McpStatus>("/api/mcp/stop", { method: "POST" });
 }
 
 export async function mcpLogs(since: number): Promise<{ lines: McpLogLine[]; next: number }> {
-  const r = await fetch(`/api/mcp/logs?since=${since}`);
-  if (!r.ok) throw new Error(`mcp logs failed: ${r.status}`);
-  return await r.json();
+  return req(`/api/mcp/logs?since=${since}`);
+}
+
+export async function workspaceLogs(since: number): Promise<{ lines: McpLogLine[]; next: number }> {
+  return req(`/api/logs?since=${since}`);
+}
+
+export interface McpTool {
+  name: string;
+  description: string;
+}
+
+export async function mcpTools(): Promise<McpTool[]> {
+  return req<{ tools: McpTool[] }>("/api/mcp/tools").then((j) => j.tools);
 }
 
 export interface SkillTargetState {
@@ -269,17 +328,11 @@ export interface SkillInstallResult {
 }
 
 export async function skillsStatus(): Promise<SkillStatus> {
-  const r = await fetch("/api/skills/status");
-  if (!r.ok) throw new Error(`skill status failed: ${r.status}`);
-  return await r.json();
+  return req<SkillStatus>("/api/skills/status");
 }
 
 export async function installSkills(force: boolean): Promise<SkillInstallResult[]> {
-  const r = await fetch("/api/skills/install", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ force }),
-  });
-  if (!r.ok) throw new Error(`skill install failed: ${r.status}`);
-  return (await r.json()).results;
+  return req<{ results: SkillInstallResult[] }>("/api/skills/install", json({ force })).then(
+    (j) => j.results
+  );
 }
