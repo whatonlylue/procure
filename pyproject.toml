@@ -1,6 +1,6 @@
 [project]
 name = "procure"
-version = "0.2.2"
+version = "0.2.3"
 description = "Local-first RAG: drag-drop ingest, chunk+embed+store, semantic search."
 license = { text = "MIT" }
 requires-python = ">=3.11"
@@ -19,7 +19,9 @@ sbert = ["sentence-transformers>=3.0"]
 chroma = ["chromadb>=0.5"]
 ocr = ["rapidocr-onnxruntime>=1.0", "pymupdf>=1.24", "pillow>=10"]
 web = ["trafilatura>=1.0"]
-all = ["sentence-transformers>=3.0", "chromadb>=0.5", "rapidocr-onnxruntime>=1.0", "pymupdf>=1.24", "pillow>=10", "trafilatura>=1.0"]
+readability = ["readability-lxml>=0.8"]
+dev = ["pyinstaller>=6"]
+all = ["sentence-transformers>=3.0", "chromadb>=0.5", "rapidocr-onnxruntime>=1.0", "pymupdf>=1.24", "pillow>=10", "trafilatura>=1.0", "readability-lxml>=0.8"]
 
 [build-system]
 requires = ["setuptools>=61"]
@@ -29,4 +31,8 @@ build-backend = "setuptools.build_meta"
 include = ["app*"]
 
 [tool.setuptools.package-data]
-app = ["static/**"]
+app = ["static/**", "_skill_data/**"]
+
+[tool.ruff]
+target-version = "py311"
+select = ["F"]
