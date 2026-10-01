@@ -14,8 +14,6 @@ BM25 + heuristic rerank, and every neural import in app/ degrades
 gracefully. This keeps the binary ~100MB instead of ~2GB.
 """
 
-block_cipher = None
-
 a = Analysis(
     ["app/cli.py"],
     pathex=[],
@@ -54,13 +52,10 @@ a = Analysis(
         "IPython",
         "jupyter",
     ],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data)
 
 exe = EXE(
     pyz,
