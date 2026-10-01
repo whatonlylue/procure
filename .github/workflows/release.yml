@@ -51,6 +51,13 @@ jobs:
           npm ci
           npm run build
 
+      - name: Stage dummy sidecar for cargo test
+        run: |
+          TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p src-tauri/binaries
+          touch "src-tauri/binaries/procure-sidecar-${TRIPLE}"
+          chmod +x "src-tauri/binaries/procure-sidecar-${TRIPLE}"
+
       - name: Desktop shell tests
         run: |
           cd src-tauri
