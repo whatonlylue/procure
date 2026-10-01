@@ -41,6 +41,7 @@ import {
   workspaceLogs,
 } from "./api";
 import { THEMES, ThemeName, applyTheme, getInitialTheme } from "./theme";
+import { Toast, ToastKind, ToastStack } from "./toasts";
 
 type Tab = "search" | "library" | "sources" | "mcp";
 
@@ -135,7 +136,7 @@ export default function App() {
   const [hits, setHits] = useState<Hit[]>([]);
   const [searched, setSearched] = useState("");
   const [busy, setBusy] = useState("");
-  const [notice, setNotice] = useState("");
+  const [toasts, setToasts] = useState<Toast[]>([]);
   const [drag, setDrag] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
   const [topK, setTopK] = useState(10);
@@ -183,6 +184,37 @@ export default function App() {
   const pollRef = useRef<number | null>(null);
   const libVersion = useRef<string | null>(null);
   const refreshing = useRef(false);
+  const toastId = useRef(0);
+
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  // User alerts (errors, statuses, confirmations) surface as dismissable
+  // toasts in the top-right corner instead of inline text.
+  const notify = useCallback((text: string, kind: ToastKind = "info") => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    toastId.current += 1;
+    const id = toastId.current;
+    setToasts((prev) => [...prev.slice(-4), { id, kind, text: trimmed }]);
+  }, []);
+
+  const notifyError = useCallback(
+    (e: unknown) => {
+      notify(String(e), "error");
+    },
+    [notify]
+  );
+
+  // Compatibility bridge: every former inline notice now surfaces as a
+  // dismissable toast. Empty clears are no-ops; error-looking text gets
+  // the error style, everything else the info style.
+  const setNotice = (text: string) => {
+    const t = text.trim();
+    if (!t) return;
+    notify(t, /fail|error/i.test(t) ? "error" : "info");
+  };
 
   const refresh = useCallback(async () => {
     refreshing.current = true;
@@ -233,7 +265,7 @@ export default function App() {
   // External writers (MCP server memories, watch sync) bypass the UI, so
   // poll the cheap version fingerprint and reload only when it moves.
   // Failures stay silent: the next tick retries, and a failed reload
-  // already surfaces through refresh()'s own notice.
+  // already surfaces through refresh()'s own error toast.
   const checkVersion = useCallback(async () => {
     if (document.visibilityState === "hidden" || refreshing.current) return;
     let key: string;
@@ -390,7 +422,12 @@ export default function App() {
         if (j.status === "done" || j.status === "failed" || j.status === "cancelled") {
           stopPoll();
           setBusy("");
-          setNotice(j.status === "failed" ? `Job failed: ${j.error}` : summarizeResults(j.result));
+          if (j.status === "failed") {
+            notifyError(`Job failed: ${j.error}`);
+          } else {
+            const summary = summarizeResults(j.result);
+            notify(summary, /fail|error/i.test(summary) ? "error" : "success");
+          }
           await refresh();
         }
       } catch (e) {
@@ -525,11 +562,16 @@ export default function App() {
     try {
       const results = await installSkills(force);
       const errs = results.filter((r) => r.action === "error");
-      setNotice(
-        errs.length
-          ? `Skill install errors: ${errs.map((r) => `${r.id}: ${r.detail}`).join("; ")}`
-          : `Skill ${results.map((r) => `${r.id} ${r.action}`).join(", ")}.`
-      );
+      if (errs.length) {
+        notifyError(
+          `Skill install errors: ${errs.map((r) => `${r.id}: ${r.detail}`).join("; ")}`
+        );
+      } else {
+        notify(
+          `Skill ${results.map((r) => `${r.id} ${r.action}`).join(", ")}.`,
+          "success"
+        );
+      }
       setSkill(await skillsStatus());
     } catch (e) {
       setNotice(String(e));
@@ -566,13 +608,13 @@ export default function App() {
       const doc = await addUrl(url.trim(), parseTags(urlTags), urlDocType);
       setUrl("");
       setUrlTags("");
-      setNotice(
-        doc.status === "duplicate"
-          ? `Already in library as ${doc.filename}.`
-          : doc.status === "failed"
-            ? `Failed: ${doc.error}`
-            : `Added ${doc.filename} (${doc.chunk_count} chunks).`
-      );
+      if (doc.status === "failed") {
+        notifyError(`Failed: ${doc.error}`);
+      } else if (doc.status === "duplicate") {
+        notify(`Already in library as ${doc.filename}.`, "info");
+      } else {
+        notify(`Added ${doc.filename} (${doc.chunk_count} chunks).`, "success");
+      }
       await refresh();
     } catch (e) {
       setNotice(String(e));
@@ -702,6 +744,7 @@ export default function App() {
 
   return (
     <div className="shell">
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
       <aside className="side">
         <div className="side-brand">
           <span className="logo">P</span>
@@ -775,10 +818,9 @@ export default function App() {
           </div>
         )}
 
-        {(busy || notice) && (
+        {busy && (
           <p className="status">
-            {busy && <span className="busy mono">{busy}</span>}
-            {notice && <span>{notice}</span>}
+            <span className="busy mono">{busy}</span>
           </p>
         )}
 
