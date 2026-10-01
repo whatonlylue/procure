@@ -154,6 +154,38 @@ def _parser() -> argparse.ArgumentParser:
     li.add_argument("--data-dir", default=None,
                     help="same meaning as serve --data-dir")
 
+    b = sub.add_parser("bench", help="run a retrieval benchmark")
+    b.add_argument("action", choices=["run", "init", "pull", "list"],
+                   help="run: score queries; init: write sample dataset; "
+                        "pull: download a BEIR/MTEB dataset; list: show them")
+    b.add_argument("--corpus", default=None,
+                   help="corpus.jsonl (run: required unless --beir-dir)")
+    b.add_argument("--queries", default=None,
+                   help="queries.jsonl (run: required unless --beir-dir)")
+    b.add_argument("--beir-dir", default=None,
+                   help="BEIR-style dir (corpus.jsonl + queries + qrels.tsv)")
+    b.add_argument("--init-dir", default="benchmarks/sample",
+                   help="init: where to write the sample dataset")
+    b.add_argument("--dataset", default=None,
+                   help="pull: registry key (see bench list) or mteb org/repo")
+    b.add_argument("--source", default="mteb",
+                   help="pull: mteb (stdlib-only, default) or beir (parquet)")
+    b.add_argument("--split", default="test",
+                   help="pull: qrels split test|dev|train (default: test)")
+    b.add_argument("--max-queries", type=int, default=None,
+                   help="pull: keep only the first N judged queries (corpus "
+                        "stays complete; default: all)")
+    b.add_argument("--dest", default=None,
+                   help="pull: target dir (default: data/benchmarks/<dataset>)")
+    b.add_argument("--ks", default="5,10",
+                   help="comma-separated k values (default: 5,10)")
+    b.add_argument("--out", default=None,
+                   help="write JSON report here (default: stdout)")
+    b.add_argument("--markdown", action="store_true",
+                   help="print a Markdown summary alongside the JSON")
+    b.add_argument("--data-dir", default=None,
+                   help="benchmark library dir (default: temp isolated dir)")
+
     se = sub.add_parser("search", help="search the library")
     se.add_argument("query")
     se.add_argument("--top-k", type=int, default=5)
@@ -335,6 +367,94 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bench(args: argparse.Namespace) -> int:
+    import json
+    import tempfile
+
+    from app.bench.datasets import (
+        load_beir_dir,
+        load_corpus_jsonl,
+        load_queries_jsonl,
+        write_sample_dataset,
+    )
+
+    if args.action == "init":
+        paths = write_sample_dataset(args.init_dir)
+        print(f"wrote {paths['corpus']}\nwrote {paths['queries']}")
+        return 0
+
+    if args.action == "list":
+        from app.bench.sources import list_datasets
+
+        rows = list_datasets()
+        width = max(len(r["dataset"]) for r in rows)
+        for r in rows:
+            print(f"{r['dataset']:<{width}}  {r['size']:<14} "
+                  f"{r['domain']} [{r['mteb']}]")
+        return 0
+
+    if args.action == "pull":
+        from app.bench.sources import pull
+
+        if not args.dataset:
+            print("error: bench pull needs --dataset (see bench list)")
+            return 1
+        try:
+            out = pull(args.dataset, args.source, args.split,
+                       args.max_queries, args.dest)
+        except (ValueError, RuntimeError, OSError) as e:
+            print(f"error: {e}")
+            return 1
+        print(f"pulled {out['num_docs']} docs, {out['num_queries']} queries")
+        print(f"corpus:  {out['corpus']}\nqueries: {out['queries']}")
+        return 0
+
+    try:
+        ks = tuple(int(k) for k in (args.ks or "").split(",") if k.strip())
+        if not ks:
+            raise ValueError("empty")
+    except ValueError:
+        print("error: --ks must be comma-separated ints like 5,10")
+        return 1
+    try:
+        if args.beir_dir:
+            corpus, queries = load_beir_dir(args.beir_dir)
+        elif args.corpus and args.queries:
+            corpus = load_corpus_jsonl(args.corpus)
+            queries = load_queries_jsonl(args.queries)
+        else:
+            print("error: bench run needs --corpus + --queries or --beir-dir")
+            return 1
+    except (ValueError, OSError) as e:
+        print(f"error: {e}")
+        return 1
+
+    from app.bench.runner import run_benchmark
+    from app.config import get_settings
+    from app.service import RAGService
+
+    if args.data_dir:
+        data_dir = resolve_data_dir(args.data_dir)
+        svc = RAGService(get_settings())
+        report = run_benchmark(svc, corpus, queries, ks)
+    else:
+        with tempfile.TemporaryDirectory(prefix="procure-bench-") as tmp:
+            resolve_data_dir(tmp)
+            report = run_benchmark(RAGService(get_settings()), corpus, queries, ks)
+            data_dir = tmp + " (temp, discarded)"
+    payload = json.dumps(report.to_dict(), indent=2)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(payload + "\n")
+        print(f"wrote {args.out} ({data_dir})")
+    else:
+        print(payload)
+    if args.markdown:
+        print()
+        print(report.to_markdown())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "serve":
@@ -353,6 +473,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_list(args)
     if args.command == "search":
         return cmd_search(args)
+    if args.command == "bench":
+        return cmd_bench(args)
     raise AssertionError(f"unhandled command {args.command}")
 
 
