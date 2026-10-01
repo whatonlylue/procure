@@ -12,7 +12,44 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Backend tests
+        run: |
+          pip install .
+          python -m unittest discover -s tests
+
+      - name: Lint (ruff)
+        run: |
+          pip install ruff
+          ruff check app tests
+
+      - name: Frontend typecheck + build
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Desktop shell tests
+        run: |
+          cd src-tauri
+          cargo test
+
   build:
+    needs: test
     strategy:
       fail-fast: false
       matrix:
