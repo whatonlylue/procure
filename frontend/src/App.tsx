@@ -6,6 +6,7 @@ import {
   Job,
   McpLogLine,
   McpStatus,
+  McpTool,
   SkillStatus,
   TagCount,
   WatchFolder,
@@ -13,8 +14,10 @@ import {
   addWatch,
   cancelJob,
   deleteDoc,
+  exportLibrary,
   getJob,
   health as fetchHealth,
+  importLibrary,
   installSkills,
   listDocs,
   listTags,
@@ -23,25 +26,68 @@ import {
   mcpStart,
   mcpStatus,
   mcpStop,
+  mcpTools,
+  patchDoc,
   reingestDoc,
   removeWatch,
+  rerankIsOff,
   search,
   setDocTags,
   skillsStatus,
   syncWatches,
   updateSettings,
   uploadFilesAsync,
+  workspaceLogs,
 } from "./api";
 import { THEMES, ThemeName, applyTheme, getInitialTheme } from "./theme";
 
 type Tab = "search" | "library" | "sources" | "mcp";
 
+const TABS: { id: Tab; label: string; key: string }[] = [
+  { id: "search", label: "Search", key: "1" },
+  { id: "library", label: "Library", key: "2" },
+  { id: "sources", label: "Sources", key: "3" },
+  { id: "mcp", label: "MCP Server", key: "4" },
+];
+
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp"]);
+const LIB_PAGE_SIZE = 50;
+const SCOPE_FETCH_MAX = 500;
+const SCOPE_RENDER_MAX = 200;
+
 function fmt(n: number | undefined): string {
-  return typeof n === "number" && Number.isFinite(n) ? `${Math.round(n * 100)}%` : "—";
+  if (typeof n !== "number" || !Number.isFinite(n)) return "—";
+  return `${Math.round(Math.max(0, Math.min(1, n)) * 100)}%`;
 }
 
 function parseTags(s: string): string[] {
   return s.split(",").map((t) => t.trim()).filter(Boolean);
+}
+
+function toggleInSet(setter: (f: (s: Set<string>) => Set<string>) => void, id: string) {
+  setter((s) => {
+    const n = new Set(s);
+    if (n.has(id)) n.delete(id);
+    else n.add(id);
+    return n;
+  });
+}
+
+function isTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI__" in window;
+}
+
+async function pickFolder(): Promise<string | null> {
+  // Native picker under Tauri (dialog plugin, open with directory mode);
+  // the typed path stays as the fallback everywhere else.
+  const tauri = (window as unknown as { __TAURI__?: { core: { invoke: (cmd: string, args?: unknown) => Promise<unknown> } } }).__TAURI__;
+  if (!tauri) return null;
+  const res = await tauri.core.invoke("plugin:dialog|open", {
+    options: { directory: true, multiple: false, title: "Watch a folder" },
+  });
+  if (typeof res === "string") return res;
+  if (Array.isArray(res) && typeof res[0] === "string") return res[0] as string;
+  return null;
 }
 
 const GREETINGS = [
@@ -77,6 +123,9 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("search");
   const [theme, setTheme] = useState<ThemeName>(getInitialTheme);
   const [docs, setDocs] = useState<Doc[]>([]);
+  const [docsTotal, setDocsTotal] = useState(0);
+  const [scopeList, setScopeList] = useState<Doc[]>([]);
+  const [scopeTruncated, setScopeTruncated] = useState(false);
   const [tags, setTags] = useState<TagCount[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
@@ -90,51 +139,79 @@ export default function App() {
   const [backend, setBackend] = useState<Health | null>(null);
   const [mcp, setMcp] = useState<McpStatus | null>(null);
   const [mcpLines, setMcpLines] = useState<McpLogLine[]>([]);
+  const [wsLines, setWsLines] = useState<McpLogLine[]>([]);
+  const [tools, setTools] = useState<McpTool[]>([]);
   const [copied, setCopied] = useState(false);
   const [skill, setSkill] = useState<SkillStatus | null>(null);
   // Search scope.
   const [filterTags, setFilterTags] = useState<Set<string>>(new Set());
   const [scopeDocs, setScopeDocs] = useState<Set<string>>(new Set());
+  const [scopeFilter, setScopeFilter] = useState("");
   const [scopeSource, setScopeSource] = useState("");
   const [scopeDocType, setScopeDocType] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [greeting] = useState<string>(pickGreeting);
-  // Library tag editor.
+  // Library browser.
   const [editingTags, setEditingTags] = useState<string | null>(null);
   const [tagDraft, setTagDraft] = useState("");
+  const [libQuery, setLibQuery] = useState("");
+  const [libSort, setLibSort] = useState("newest");
+  const [libType, setLibType] = useState("");
+  const [libPage, setLibPage] = useState(0);
   // Sources tab.
   const [url, setUrl] = useState("");
   const [urlTags, setUrlTags] = useState("");
+  const [urlDocType, setUrlDocType] = useState("document");
+  const [uploadDocType, setUploadDocType] = useState("document");
   const [watches, setWatches] = useState<WatchFolder[]>([]);
   const [lastScan, setLastScan] = useState<string | null>(null);
   const [watchPath, setWatchPath] = useState("");
   const [watchRecursive, setWatchRecursive] = useState(true);
+  const [watchDeleteDocs, setWatchDeleteDocs] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const importRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const mcpNext = useRef(0);
+  const wsNext = useRef(0);
   const mcpLogRef = useRef<HTMLPreElement>(null);
+  const wsLogRef = useRef<HTMLPreElement>(null);
   const mcpFollow = useRef(true);
+  const wsFollow = useRef(true);
   const pollRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [d, h, m, t, w] = await Promise.all([
-        listDocs(),
+      const [lib, scope, h, m, t, w] = await Promise.all([
+        listDocs({ query: libQuery || undefined, sort: libSort, docType: libType || undefined, limit: LIB_PAGE_SIZE, offset: libPage * LIB_PAGE_SIZE }),
+        listDocs({ limit: SCOPE_FETCH_MAX, sort: "newest" }),
         fetchHealth(),
         mcpStatus(),
         listTags(),
         listWatches(),
       ]);
-      setDocs(d);
+      setDocs(lib.documents);
+      setDocsTotal(lib.total);
+      setScopeList(scope.documents);
+      setScopeTruncated(scope.total > scope.documents.length);
       setBackend(h);
       setMcp(m);
       setTags(t);
       setWatches(w.folders);
       setLastScan(w.last_scan);
+      // Prune filters that no longer resolve: vanished tags, sources, and
+      // deleted docs used to leave invisible filters (or dead scope ids)
+      // that silently returned nothing.
+      const tagNames = new Set(t.map((x) => x.tag));
+      setFilterTags((prev) => new Set([...prev].filter((x) => tagNames.has(x))));
+      const ids = new Set(scope.documents.map((d) => d.doc_id));
+      setScopeDocs((prev) => new Set([...prev].filter((x) => ids.has(x))));
+      setSelected((prev) => new Set([...prev].filter((x) => ids.has(x))));
+      const sources = new Set(scope.documents.map((d) => d.source).filter(Boolean));
+      setScopeSource((prev) => (prev && !sources.has(prev) ? "" : prev));
     } catch (e) {
       setNotice(String(e));
     }
-  }, []);
+  }, [libQuery, libSort, libType, libPage]);
 
   useEffect(() => {
     refresh();
@@ -163,12 +240,20 @@ export default function App() {
     let alive = true;
     async function poll() {
       try {
-        const [s, l] = await Promise.all([mcpStatus(), mcpLogs(mcpNext.current)]);
+        const [s, l, wl] = await Promise.all([
+          mcpStatus(),
+          mcpLogs(mcpNext.current),
+          workspaceLogs(wsNext.current),
+        ]);
         if (!alive) return;
         setMcp(s);
         mcpNext.current = l.next;
         if (l.lines.length) {
           setMcpLines((prev) => [...prev, ...l.lines].slice(-1000));
+        }
+        wsNext.current = wl.next;
+        if (wl.lines.length) {
+          setWsLines((prev) => [...prev, ...wl.lines].slice(-1000));
         }
       } catch (e) {
         if (alive) setNotice(String(e));
@@ -182,27 +267,34 @@ export default function App() {
     };
   }, [tab]);
 
-  // Follow the log tail unless the user scrolled up.
+  // Follow the log tails unless the user scrolled up.
   useEffect(() => {
     const el = mcpLogRef.current;
     if (el && mcpFollow.current) el.scrollTop = el.scrollHeight;
   }, [mcpLines]);
+  useEffect(() => {
+    const el = wsLogRef.current;
+    if (el && wsFollow.current) el.scrollTop = el.scrollHeight;
+  }, [wsLines]);
 
-  // Skill install state, refreshed whenever the MCP tab opens.
+  // Skill install state + tool list, refreshed whenever the MCP tab opens.
   useEffect(() => {
     if (tab !== "mcp") return;
     let alive = true;
     skillsStatus()
       .then((s) => { if (alive) setSkill(s); })
       .catch((e) => { if (alive) setNotice(String(e)); });
+    mcpTools()
+      .then((tl) => { if (alive) setTools(tl); })
+      .catch(() => { /* tools block stays empty */ });
     return () => { alive = false; };
   }, [tab]);
 
-  // Keyboard: "/" or Cmd/Ctrl+K focuses search; 1/2 switch tabs.
+  // Keyboard: "/" or Cmd/Ctrl+K focuses search; 1-4 switch tabs.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const t = e.target as HTMLElement | null;
-      const typing = !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
+      const typing = !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT");
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setTab("search");
@@ -212,6 +304,9 @@ export default function App() {
         e.preventDefault();
         setTab("search");
         searchRef.current?.focus();
+      } else if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const found = TABS.find((x) => x.key === e.key);
+        if (found) setTab(found.id);
       }
     }
     window.addEventListener("keydown", onKey);
@@ -219,12 +314,12 @@ export default function App() {
   }, []);
 
   function summarizeResults(res: unknown): string {
-    if (!Array.isArray(res)) return "Ingest complete.";
-    const docs = res as { status?: string; filename?: string }[];
+    const docs = (Array.isArray(res) ? res : [res]) as { status?: string; filename?: string }[];
     const ready = docs.filter((d) => d.status === "ready").length;
     const dup = docs.filter((d) => d.status === "duplicate").length;
     const failed = docs.filter((d) => d.status === "failed");
     const cancelled = docs.filter((d) => d.status === "cancelled").length;
+    if (!ready && !dup && !cancelled && !failed.length) return "Done.";
     const parts = [`Ingested ${ready}`];
     if (dup) parts.push(`${dup} duplicate${dup === 1 ? "" : "s"} skipped`);
     if (cancelled) parts.push(`${cancelled} cancelled`);
@@ -256,13 +351,11 @@ export default function App() {
     const arr = Array.from(files);
     if (!arr.length) return;
     setNotice("");
-    setBusy(`Uploading ${arr.length} file(s)…`);
     try {
-      const j = await uploadFilesAsync(arr);
+      const j = await uploadFilesAsync(arr, uploadDocType);
       setJob(j);
       pollJob(j.job_id);
     } catch (e) {
-      setBusy("");
       setNotice(String(e));
     }
   }
@@ -304,33 +397,6 @@ export default function App() {
     setSearched("");
   }
 
-  function toggle(id: string) {
-    setSelected((s) => {
-      const n = new Set(s);
-      if (n.has(id)) n.delete(id);
-      else n.add(id);
-      return n;
-    });
-  }
-
-  function toggleTag(t: string) {
-    setFilterTags((s) => {
-      const n = new Set(s);
-      if (n.has(t)) n.delete(t);
-      else n.add(t);
-      return n;
-    });
-  }
-
-  function toggleScopeDoc(id: string) {
-    setScopeDocs((s) => {
-      const n = new Set(s);
-      if (n.has(id)) n.delete(id);
-      else n.add(id);
-      return n;
-    });
-  }
-
   async function doDelete(id: string) {
     setBusy("Deleting…");
     try {
@@ -349,15 +415,13 @@ export default function App() {
   }
 
   async function doReingest(id: string) {
-    setBusy("Re-ingesting…");
+    setNotice("");
     try {
-      await reingestDoc(id);
-      await refresh();
-      setNotice("Re-ingest complete.");
+      const j = await reingestDoc(id, true);
+      setJob(j as Job);
+      pollJob((j as Job).job_id);
     } catch (e) {
       setNotice(String(e));
-    } finally {
-      setBusy("");
     }
   }
 
@@ -426,11 +490,14 @@ export default function App() {
     return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
   }
 
-  async function changeSetting(patch: { search?: string; rerank?: string }) {
+  async function changeSetting(patch: { search?: string; rerank?: string; mcp_autostart?: boolean }) {
     setNotice("");
     try {
       const s = await updateSettings(patch);
-      setBackend((b) => (b ? { ...b, search: s.search, rerank: s.rerank } : b));
+      setBackend((b) => (b ? { ...b, search: s.search, rerank: s.rerank, mcp_autostart: s.mcp_autostart } : b));
+      if ((patch.search !== undefined || patch.rerank !== undefined) && mcp?.running) {
+        setNotice("Retrieval settings saved — restart the MCP server to apply them there.");
+      }
     } catch (e) {
       setNotice(String(e));
     }
@@ -442,7 +509,7 @@ export default function App() {
     setBusy("Fetching URL…");
     setNotice("");
     try {
-      const doc = await addUrl(url.trim(), parseTags(urlTags));
+      const doc = await addUrl(url.trim(), parseTags(urlTags), urlDocType);
       setUrl("");
       setUrlTags("");
       setNotice(
@@ -468,22 +535,35 @@ export default function App() {
     try {
       await addWatch(watchPath.trim(), watchRecursive);
       setWatchPath("");
-      setNotice("Watching folder — first sync running in background.");
       const j = await syncWatches();
       setJob(j);
       pollJob(j.job_id);
+      setBusy("");
       await refresh();
     } catch (e) {
-      setNotice(String(e));
-    } finally {
       setBusy("");
+      setNotice(String(e));
     }
   }
 
-  async function handleRemoveWatch(id: number) {
+  async function handleBrowseWatch() {
     setNotice("");
     try {
-      await removeWatch(id);
+      const picked = await pickFolder();
+      if (picked) setWatchPath(picked);
+      else if (!isTauri()) setNotice("Folder picker needs the desktop app — type the path instead.");
+    } catch {
+      setNotice("Folder picker unavailable — type the path instead.");
+    }
+  }
+
+  async function handleRemoveWatch(id: number, path: string) {
+    setNotice("");
+    try {
+      if (watchDeleteDocs) {
+        if (!window.confirm("Remove this watch and delete its documents?")) return;
+      }
+      await removeWatch(id, watchDeleteDocs);
       await refresh();
     } catch (e) {
       setNotice(String(e));
@@ -492,35 +572,79 @@ export default function App() {
 
   async function handleSyncWatches() {
     if (busy) return;
-    setBusy("Syncing folders…");
     setNotice("");
     try {
       const j = await syncWatches();
       setJob(j);
       pollJob(j.job_id);
     } catch (e) {
-      setBusy("");
       setNotice(String(e));
     }
   }
 
-  const ready = docs.filter((d) => d.status === "ready").length;
+  async function handleExport() {
+    setNotice("");
+    try {
+      const blob = await exportLibrary();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "procure-export.json";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      setNotice(String(e));
+    }
+  }
+
+  async function handleImport(files: FileList | null) {
+    if (!files || !files.length) return;
+    setNotice("");
+    try {
+      const j = await importLibrary(files[0]);
+      setJob(j);
+      pollJob(j.job_id);
+    } catch (e) {
+      setNotice(String(e));
+    }
+  }
+
+  async function handleRenameType(id: string, patch: { filename?: string; doc_type?: string }) {
+    setNotice("");
+    try {
+      await patchDoc(id, patch);
+      await refresh();
+    } catch (e) {
+      setNotice(String(e));
+    }
+  }
+
+  const ready = scopeList.filter((d) => d.status === "ready").length;
   const hasSearched = searched !== "";
   const activeFilterCount = filterTags.size + scopeDocs.size + (scopeSource ? 1 : 0) + (scopeDocType ? 1 : 0);
   const searchMode = (backend?.search ?? "hybrid").toLowerCase() === "dense" ? "dense" : "hybrid";
   const mode = searchMode === "hybrid" ? "Keywords + meaning" : "Meaning only";
-  const rerankOff = ["", "0", "false", "no", "off"].includes((backend?.rerank ?? "on").toLowerCase());
-  const rerank = rerankOff ? "Off" : "On";
+  const off = rerankIsOff(backend?.rerank);
+  const neural = (backend?.rerank_backend ?? "heuristic") === "neural";
+  const rerank = off ? "Off" : neural ? "On" : "On · words";
   // Raw BM25 word-match scores are unbounded, so normalize against the best
   // match in this result set to display them out of 100.
   const sparseMax = Math.max(0, ...hits.map((h) => h.sparse_score ?? 0));
   const jobActive = job !== null && (job.status === "queued" || job.status === "running");
   const jobPct = job && job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
+  const ocrOn = !!(backend?.ocr && backend.ocr !== "off");
   const formatHint = (backend?.formats ?? [])
     .map((f) => f.replace(/^\./, ""))
-    .filter((f) => !["tif", "tiff", "bmp", "webp", "xlsm", "xltx", "htm", "markdown", "textile", "nfo"].includes(f))
+    .filter((f) => {
+      if (IMAGE_EXTS.has(f)) return ocrOn;
+      return !["tif", "tiff", "bmp", "webp", "xlsm", "xltx", "htm", "markdown", "textile", "nfo"].includes(f);
+    })
     .join(" / ");
-  const sources = [...new Set(docs.map((d) => d.source).filter(Boolean))].sort();
+  const sources = [...new Set(scopeList.map((d) => d.source).filter(Boolean))].sort();
+  const scopeShown = scopeFilter
+    ? scopeList.filter((d) => d.filename.toLowerCase().includes(scopeFilter.toLowerCase()))
+    : scopeList;
+  const scopeCapped = scopeShown.slice(0, SCOPE_RENDER_MAX);
+  const libPages = Math.max(1, Math.ceil(docsTotal / LIB_PAGE_SIZE));
 
   return (
     <div className="shell">
@@ -528,38 +652,36 @@ export default function App() {
         <div className="side-brand">
           <span className="logo">P</span>
           <span className="wordmark">procure</span>
-          <span className="ver mono">v0.2.2</span>
+          <span className="ver mono">v{backend?.version ?? "…"}</span>
         </div>
 
         <div className="side-label">WORKSPACE</div>
         <nav className="side-nav">
-          <button className={tab === "search" ? "on" : ""} onClick={() => setTab("search")}>
-            <span className="key">1</span> Search
-          </button>
-          <button className={tab === "library" ? "on" : ""} onClick={() => setTab("library")}>
-            <span className="key">2</span> Library
-            <span className="count mono">{docs.length}</span>
-          </button>
-          <button className={tab === "sources" ? "on" : ""} onClick={() => setTab("sources")}>
-            <span className="key">3</span> Sources
-            {watches.length > 0 && <span className="count mono">{watches.length}</span>}
-          </button>
-          <button className={tab === "mcp" ? "on" : ""} onClick={() => setTab("mcp")}>
-            <span className="key">4</span> MCP Server
-            {mcp?.running && <span className="dot" title="MCP server running" />}
-          </button>
+          {TABS.map((t) => (
+            <button key={t.id} className={tab === t.id ? "on" : ""} onClick={() => setTab(t.id)}>
+              <span className="key">{t.key}</span> {t.label}
+              {t.id === "library" && <span className="count mono">{docsTotal}</span>}
+              {t.id === "sources" && watches.length > 0 && <span className="count mono">{watches.length}</span>}
+              {t.id === "mcp" && mcp?.running && <span className="dot" title="MCP server running" />}
+            </button>
+          ))}
         </nav>
 
         <div className="side-label">SEARCH SETUP</div>
         <dl className="side-meta mono">
           <div title="How results are found"><dt>MATCHING</dt><dd>{mode}</dd></div>
-          <div title="Whether answer-quality ranking is applied"><dt>ANSWER RANK</dt><dd>{rerank}</dd></div>
+          <div title={neural ? "Neural cross-encoder + NLI when loaded, word-match coverage otherwise" : "Word-match coverage (no neural models in this build)"}><dt>ANSWER RANK</dt><dd>{rerank}</dd></div>
           <div><dt>RESULTS</dt><dd>{topK}</dd></div>
           <div><dt>CHUNKS</dt><dd>{backend?.chunks ?? "—"}</dd></div>
-          <div><dt>READY</dt><dd>{ready}/{docs.length}</dd></div>
+          <div><dt>READY</dt><dd>{ready}{scopeTruncated ? "+" : ""}/{docsTotal}</dd></div>
           <div title="OCR backend for scanned PDFs and images"><dt>OCR</dt><dd>{backend?.ocr || "off"}</dd></div>
         </dl>
         <p className="side-hint">Matching + ranking can be changed from the Search tab.</p>
+        {backend?.dense && !backend.dense.dense_ok && (
+          <p className="warn mono" title={backend.dense.warning}>
+            DENSE DEGRADED — {backend.dense.warning}
+          </p>
+        )}
 
         <div className="side-label">THEME</div>
         <div className="theme-swatches" role="group" aria-label="Color theme">
@@ -588,9 +710,11 @@ export default function App() {
         {jobActive && job && (
           <div className="progress" role="status">
             <div className="progress-row mono">
-              <span>{job.kind === "watch-sync" ? "SYNC" : `FILE ${job.done + 1}/${job.total}`}</span>
+              <span>
+                {job.kind === "watch-sync" ? "SYNC" : job.total > 0 ? `FILE ${Math.min(job.done + 1, job.total)}/${job.total}` : job.label.toUpperCase()}
+              </span>
               <span className="truncate">{job.current || job.label}</span>
-              <span>{jobPct}%</span>
+              <span>{job.total > 0 ? `${jobPct}%` : "…"}</span>
               <button className="danger" onClick={cancelCurrentJob}>Cancel</button>
             </div>
             <div className="bar"><i style={{ width: `${jobPct}%` }} /></div>
@@ -662,11 +786,11 @@ export default function App() {
                       <span>ANSWER RANK</span>
                       <select
                         className="mono"
-                        value={rerankOff ? "off" : "on"}
+                        value={off ? "off" : "on"}
                         onChange={(e) => changeSetting({ rerank: e.target.value })}
                         aria-label="Answer ranking"
                       >
-                        <option value="on">On</option>
+                        <option value="on">On{neural ? "" : " (words)"}</option>
                         <option value="off">Off</option>
                       </select>
                     </label>
@@ -678,22 +802,20 @@ export default function App() {
                         <button type="button" onClick={() => setTopK((k) => Math.min(50, k + 1))} aria-label="more results">+</button>
                       </span>
                     </label>
-                    {sources.length > 0 && (
-                      <label className="ctl">
-                        <span>SOURCE</span>
-                        <select
-                          className="mono"
-                          value={scopeSource}
-                          onChange={(e) => setScopeSource(e.target.value)}
-                          aria-label="Filter by document source"
-                        >
-                          <option value="">All</option>
-                          {sources.map((s) => (
-                            <option key={s} value={s}>{s}</option>
-                          ))}
-                        </select>
-                      </label>
-                    )}
+                    <label className="ctl">
+                      <span>SOURCE</span>
+                      <select
+                        className="mono"
+                        value={scopeSource}
+                        onChange={(e) => setScopeSource(e.target.value)}
+                        aria-label="Filter by document source"
+                      >
+                        <option value="">All</option>
+                        {sources.map((s) => (
+                          <option key={s} value={s}>{s}</option>
+                        ))}
+                      </select>
+                    </label>
                     <label className="ctl">
                       <span>TYPE</span>
                       <select
@@ -707,14 +829,19 @@ export default function App() {
                         <option value="memory">Agent memories</option>
                       </select>
                     </label>
-                    {tags.length > 0 && (
-                      <span className="chipsgroup" role="group" aria-label="Filter by tag">
+                  </div>
+                  {tags.length > 0 && (
+                    <details className="scope">
+                      <summary className="mono">
+                        TAGS: {filterTags.size ? `${filterTags.size} SELECTED` : "ALL"}
+                      </summary>
+                      <div className="taglist" role="group" aria-label="Filter by tag">
                         {tags.map((t) => (
                           <button
                             key={t.tag}
                             type="button"
                             className={`chip mono${filterTags.has(t.tag) ? " on" : ""}`}
-                            onClick={() => toggleTag(t.tag)}
+                            onClick={() => toggleInSet(setFilterTags, t.tag)}
                             title={`${t.count} document(s)`}
                           >
                             {t.tag} · {t.count}
@@ -725,25 +852,35 @@ export default function App() {
                             Clear
                           </button>
                         )}
-                      </span>
-                    )}
-                  </div>
-                  {docs.length > 0 && (
+                      </div>
+                    </details>
+                  )}
+                  {scopeList.length > 0 && (
                     <details className="scope">
                       <summary className="mono">
                         SCOPE: {scopeDocs.size ? `${scopeDocs.size} DOC${scopeDocs.size === 1 ? "" : "S"}` : "ALL DOCUMENTS"}
                       </summary>
                       <div className="scopelist">
-                        {docs.map((d) => (
+                        <input
+                          className="mono"
+                          value={scopeFilter}
+                          onChange={(e) => setScopeFilter(e.target.value)}
+                          placeholder="filter documents…"
+                          aria-label="Filter scoped documents"
+                        />
+                        {scopeCapped.map((d) => (
                           <label key={d.doc_id} className="ctl check">
                             <input
                               type="checkbox"
                               checked={scopeDocs.has(d.doc_id)}
-                              onChange={() => toggleScopeDoc(d.doc_id)}
+                              onChange={() => toggleInSet(setScopeDocs, d.doc_id)}
                             />
                             <span className="truncate">{d.filename}</span>
                           </label>
                         ))}
+                        {scopeShown.length > scopeCapped.length && (
+                          <span className="mono dim">…{scopeShown.length - scopeCapped.length} more — refine the filter</span>
+                        )}
                         {scopeDocs.size > 0 && (
                           <button type="button" onClick={() => setScopeDocs(new Set())}>Clear scope</button>
                         )}
@@ -773,25 +910,26 @@ export default function App() {
                     {h.doc_type === "memory" && (
                       <span className="pill mono memory" title="Cross-agent memory">MEMORY</span>
                     )}
-                    <span className="score mono" title="Overall similarity to your query">SIMILARITY <b>{fmt(h.score)}</b></span>
+                    <span className="score mono" title="Blended rank score for your query">SCORE <b>{fmt(h.score)}</b></span>
                   </div>
                   <p className="snippet">{h.text}</p>
                   <div className="signals mono">
                     <span title="Exact-word match strength, relative to the best match in these results">WORD MATCH <b>{sparseMax > 0 ? fmt((h.sparse_score ?? 0) / sparseMax) : "0%"}</b></span>
                     <span title="How close the meaning is to your query">MEANING <b>{fmt(h.dense_score)}</b></span>
-                    <span title="How likely this passage answers your query" className="ans">
-                      ANSWER <b>{fmt(h.answerability)}</b>
-                      <span className="minibar">
-                        <i style={{ width: `${Math.max(0, Math.min(1, h.answerability ?? 0)) * 100}%` }} />
+                    {!off && (
+                      <span title="How likely this passage answers your query" className="ans">
+                        ANSWER <b>{fmt(h.answerability)}</b>
+                        <span className="minibar">
+                          <i style={{ width: `${Math.max(0, Math.min(1, h.answerability ?? 0)) * 100}%` }} />
+                        </span>
                       </span>
-                    </span>
-                    {(h.entailment ?? 0) >= 0.5 && (
+                    )}
+                    {!off && (h.entailment ?? 0) >= 0.5 && (
                       <span className="direct" title="This passage directly supports an answer to your query">
                         DIRECT ANSWER
                       </span>
                     )}
                   </div>
-                  <div className="docline mono">DOC {h.doc_id} · CHUNK {h.chunk_id}</div>
                 </li>
               ))}
             </ol>
@@ -802,6 +940,33 @@ export default function App() {
         ) : tab === "library" ? (
           <main>
             <div className="libbar">
+              <input
+                className="mono"
+                value={libQuery}
+                onChange={(e) => { setLibQuery(e.target.value); setLibPage(0); }}
+                placeholder="search library…"
+                aria-label="Search library"
+              />
+              <select
+                className="mono"
+                value={libSort}
+                onChange={(e) => { setLibSort(e.target.value); setLibPage(0); }}
+                aria-label="Sort library"
+              >
+                <option value="newest">Newest</option>
+                <option value="oldest">Oldest</option>
+                <option value="name">Name</option>
+              </select>
+              <select
+                className="mono"
+                value={libType}
+                onChange={(e) => { setLibType(e.target.value); setLibPage(0); }}
+                aria-label="Filter library by type"
+              >
+                <option value="">All types</option>
+                <option value="document">Documents</option>
+                <option value="memory">Memories</option>
+              </select>
               <span className="mono">{selected.size} SELECTED</span>
               {selected.size > 0 && (
                 <button
@@ -822,6 +987,18 @@ export default function App() {
                   Delete selected
                 </button>
               )}
+              <button onClick={handleExport} title="Download a JSON backup of the library">Export</button>
+              <button onClick={() => importRef.current?.click()} title="Restore from an export file">Import</button>
+              <input
+                ref={importRef}
+                type="file"
+                accept="application/json,.json"
+                hidden
+                onChange={(e) => {
+                  handleImport(e.target.files);
+                  e.target.value = "";
+                }}
+              />
             </div>
             <table className="lib">
               <thead>
@@ -841,7 +1018,7 @@ export default function App() {
                       <input
                         type="checkbox"
                         checked={selected.has(d.doc_id)}
-                        onChange={() => toggle(d.doc_id)}
+                        onChange={() => toggleInSet(setSelected, d.doc_id)}
                         aria-label={`select ${d.filename}`}
                       />
                     </td>
@@ -877,7 +1054,10 @@ export default function App() {
                           role="button"
                           tabIndex={0}
                           onKeyDown={(e) => {
-                            if (e.key === "Enter") { setEditingTags(d.doc_id); setTagDraft((d.tags ?? []).join(", ")); }
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              setEditingTags(d.doc_id); setTagDraft((d.tags ?? []).join(", "));
+                            }
                           }}
                         >
                           {(d.tags ?? []).length
@@ -888,12 +1068,22 @@ export default function App() {
                     </td>
                     <td className="acts">
                       <button onClick={() => doReingest(d.doc_id)}>Re-ingest</button>
+                      {(d.doc_type || "document") === "memory" ? (
+                        <button onClick={() => handleRenameType(d.doc_id, { doc_type: "document" })} title="Convert to a regular document">Unmark memory</button>
+                      ) : (
+                        <button onClick={() => handleRenameType(d.doc_id, { doc_type: "memory" })} title="Convert to a cross-agent memory">Mark memory</button>
+                      )}
                       <button className="danger" onClick={() => doDelete(d.doc_id)}>Delete</button>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            <div className="libbar">
+              <button disabled={libPage <= 0} onClick={() => setLibPage((p) => Math.max(0, p - 1))}>← Prev</button>
+              <span className="mono">PAGE {libPage + 1}/{libPages} · {docsTotal} DOCS</span>
+              <button disabled={libPage + 1 >= libPages} onClick={() => setLibPage((p) => p + 1)}>Next →</button>
+            </div>
             {!docs.length && <p className="empty">Library is empty — add files from Sources.</p>}
           </main>
         ) : tab === "sources" ? (
@@ -907,7 +1097,7 @@ export default function App() {
               onClick={() => fileRef.current?.click()}
               role="button"
               tabIndex={0}
-              onKeyDown={(e) => { if (e.key === "Enter") fileRef.current?.click(); }}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") fileRef.current?.click(); }}
             >
               <input
                 ref={fileRef}
@@ -922,6 +1112,20 @@ export default function App() {
               <strong>{drag ? "DROP TO INGEST" : "DRAG + DROP FILES TO INGEST"}</strong>
               <span className="mono">{formatHint || "pdf / docx / md / txt"} — or click to browse</span>
             </section>
+            <div className="urlform">
+              <label className="ctl">
+                <span>TYPE</span>
+                <select
+                  className="mono"
+                  value={uploadDocType}
+                  onChange={(e) => setUploadDocType(e.target.value)}
+                  aria-label="Type for uploaded files"
+                >
+                  <option value="document">Documents</option>
+                  <option value="memory">Memories</option>
+                </select>
+              </label>
+            </div>
 
             <div className="resultmeta mono">ADD FROM URL</div>
             <form className="urlform" onSubmit={handleAddUrl}>
@@ -938,6 +1142,18 @@ export default function App() {
                 placeholder="tags, comma separated"
                 aria-label="Tags for this URL"
               />
+              <label className="ctl">
+                <span>TYPE</span>
+                <select
+                  className="mono"
+                  value={urlDocType}
+                  onChange={(e) => setUrlDocType(e.target.value)}
+                  aria-label="Type for this URL"
+                >
+                  <option value="document">Document</option>
+                  <option value="memory">Memory</option>
+                </select>
+              </label>
               <button type="submit" className="primary" disabled={!url.trim() || !!busy}>Add URL</button>
             </form>
 
@@ -950,6 +1166,7 @@ export default function App() {
                 placeholder="/absolute/path/to/folder"
                 aria-label="Folder path to watch"
               />
+              <button type="button" onClick={handleBrowseWatch} title="Pick a folder (desktop app)">Browse…</button>
               <label className="ctl check">
                 <input
                   type="checkbox"
@@ -970,6 +1187,9 @@ export default function App() {
                   <tr>
                     <th>Path</th>
                     <th>Recursive</th>
+                    <th>Files</th>
+                    <th>Last sync</th>
+                    <th>Status</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -978,8 +1198,19 @@ export default function App() {
                     <tr key={w.id}>
                       <td className="mono">{w.path}</td>
                       <td className="mono">{w.recursive ? "yes" : "no"}</td>
+                      <td className="mono">{w.file_count ?? "—"}</td>
+                      <td className="mono">{w.last_sync || "—"}</td>
+                      <td>{w.last_error ? <span className="err">{w.last_error}</span> : <span className="mono dim">ok</span>}</td>
                       <td className="acts">
-                        <button className="danger" onClick={() => handleRemoveWatch(w.id)}>Remove</button>
+                        <label className="ctl check" title="Also delete this folder's documents">
+                          <input
+                            type="checkbox"
+                            checked={watchDeleteDocs}
+                            onChange={(e) => setWatchDeleteDocs(e.target.checked)}
+                          />
+                          docs
+                        </label>
+                        <button className="danger" onClick={() => handleRemoveWatch(w.id, w.path)}>Remove</button>
                       </td>
                     </tr>
                   ))}
@@ -1009,6 +1240,14 @@ export default function App() {
                 {mcp?.running ? "Stop server" : "Start server"}
               </button>
             </div>
+            <label className="ctl check">
+              <input
+                type="checkbox"
+                checked={!!backend?.mcp_autostart}
+                onChange={(e) => changeSetting({ mcp_autostart: e.target.checked })}
+              />
+              Start automatically with the workspace
+            </label>
 
             <div className="mcpurl">
               <input
@@ -1029,32 +1268,19 @@ export default function App() {
               Same library, embeddings, and search pipeline as this workspace.
             </p>
 
-            <div className="mcptools">
-              <div className="mcptool">
-                <code className="mono">procure_search</code>
-                <span>Ask across the library — hybrid BM25 + dense retrieval, reranked by answerability. Scopes to doc IDs, tags, and type (documents vs agent memories).</span>
-              </div>
-              <div className="mcptool">
-                <code className="mono">procure_add_text</code>
-                <span>Save transcripts, outputs, notes — chunked, embedded, searchable immediately. Accepts tags; pass type memory for cross-agent memories.</span>
-              </div>
-              <div className="mcptool">
-                <code className="mono">procure_add_url</code>
-                <span>Fetch a web page into the library — article text extracted and searchable immediately.</span>
-              </div>
-              <div className="mcptool">
-                <code className="mono">procure_list_documents</code>
-                <span>See what is stored — every document with status, tags, and chunk counts.</span>
-              </div>
-              <div className="mcptool">
-                <code className="mono">procure://documents/{"{doc_id}"}</code>
-                <span>Fetch the full text of a document found via search or listing.</span>
-              </div>
-              <div className="mcptool">
-                <code className="mono">procure://guide</code>
-                <span>Agent usage guide — how to search, read documents, and store memories. Same content as the skill below.</span>
-              </div>
-            </div>
+            <details className="mcptools">
+              <summary className="mono">
+                COMMANDS: {tools.length ? `${tools.length} AVAILABLE` : "…"}
+              </summary>
+              {tools.length ? tools.map((t) => (
+                <div className="mcptool" key={t.name}>
+                  <code className="mono">{t.name}</code>
+                  <span>{t.description}</span>
+                </div>
+              )) : (
+                <div className="mcptool"><span className="mono dim">Loading tool list…</span></div>
+              )}
+            </details>
 
             <div className="resultmeta mono">AGENT SKILL{skill?.version ? ` · v${skill.version}` : ""}</div>
             <p className="side-hint">
@@ -1099,7 +1325,7 @@ export default function App() {
               </button>
             </div>
 
-            <div className="resultmeta mono">SERVER OUTPUT</div>
+            <div className="resultmeta mono">MCP SERVER OUTPUT</div>
             <pre
               ref={mcpLogRef}
               className="mcplog mono"
@@ -1112,6 +1338,21 @@ export default function App() {
               {mcpLines.length
                 ? mcpLines.map((l) => l.text).join("\n")
                 : "Server output appears here. Start the server to see it."}
+            </pre>
+
+            <div className="resultmeta mono">WORKSPACE SERVER LOG</div>
+            <pre
+              ref={wsLogRef}
+              className="mcplog mono"
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                wsFollow.current =
+                  el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+              }}
+            >
+              {wsLines.length
+                ? wsLines.map((l) => l.text).join("\n")
+                : "Workspace log appears here."}
             </pre>
           </main>
         )}
