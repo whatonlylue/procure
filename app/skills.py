@@ -7,10 +7,10 @@ format). That single file is:
 - picked up by Claude Code via the plugin manifests at the repo root,
 - copied into harness skill dirs by ``install-skills`` (CLI + desktop UI).
 
-Runtime lookup covers the two supported run modes: a source checkout
-(path relative to this file) and the frozen desktop sidecar (PyInstaller
-``datas`` land under ``sys._MEIPASS``). Plain wheel installs carry no
-skills tree, so the resolver degrades to a clear error there.
+Runtime lookup covers three run modes: a source checkout (path
+relative to this file), the frozen desktop sidecar (PyInstaller ``datas``
+land under ``sys._MEIPASS``), and wheel installs (a copy of the skill is
+committed under ``app/_skill_data``; tests enforce byte-identity).
 """
 from __future__ import annotations
 
@@ -27,8 +27,7 @@ SKILL_FILE = "SKILL.md"
 def skill_source_dir() -> Path:
     """Locate the bundled ``skills/procure/`` directory.
 
-    Raises FileNotFoundError when neither the frozen bundle nor a source
-    checkout provides it.
+    Raises FileNotFoundError when no run mode provides it.
     """
     candidates: list[Path] = []
     meipass = getattr(sys, "_MEIPASS", None)
@@ -39,14 +38,44 @@ def skill_source_dir() -> Path:
     for c in candidates:
         if (c / SKILL_FILE).is_file():
             return c
+    # Wheel installs: committed copy under app/_skill_data.
+    try:
+        from importlib import resources as _resources
+
+        staged = _resources.files("app._skill_data")
+        if staged.joinpath(SKILL_FILE).is_file():
+            return Path(str(staged))
+    except (ImportError, ModuleNotFoundError, TypeError, ValueError):
+        pass
     raise FileNotFoundError(
         "Bundled procure skill not found (looked in "
-        + ", ".join(str(c) for c in candidates) + ")")
+        + ", ".join(str(c) for c in candidates)
+        + " and the app._skill_data package)")
 
 
 def skill_text() -> str:
     """Full SKILL.md text, frontmatter included."""
     return (skill_source_dir() / SKILL_FILE).read_text(encoding="utf-8")
+
+
+def _field_value(line: str, field: str, indented: bool) -> str:
+    """Full frontmatter value for ``field`` on one line ("" when absent).
+
+    Values may contain spaces (descriptions); surrounding quotes are
+    stripped. A ``#`` comment ends an unquoted value.
+    """
+    pat = (rf"^\s+{re.escape(field)}\s*:" if indented
+           else rf"^{re.escape(field)}\s*:")
+    m = re.match(pat + r"\s*(.*)$", line)
+    if not m:
+        return ""
+    value = m.group(1).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    hash_at = value.find(" #")
+    if hash_at != -1:
+        value = value[:hash_at]
+    return value.strip()
 
 
 def frontmatter_field(text: str, field: str) -> str:
@@ -63,16 +92,14 @@ def frontmatter_field(text: str, field: str) -> str:
         if line.strip() == "---":
             break
         if not line.startswith((" ", "\t")):
-            in_meta = line.startswith("metadata:")
-            m = re.match(rf"^{re.escape(field)}:\s*['\"]?([^'\"\s#]+)",
-                         line)
-            if m:
-                return m.group(1)
+            in_meta = line.split(":")[0].strip() == "metadata"
+            value = _field_value(line, field, indented=False)
+            if value:
+                return value
         elif in_meta:
-            m = re.match(rf"^\s+{re.escape(field)}:\s*['\"]?([^'\"\s#]+)",
-                         line)
-            if m:
-                return m.group(1)
+            value = _field_value(line, field, indented=True)
+            if value:
+                return value
     return ""
 
 
@@ -100,8 +127,10 @@ class SkillTarget:
     def detected(self) -> bool:
         """Best-effort signal that the harness is in use."""
         if self.id == "claude":
+            # The workspace uses `Muse mcp add`; other setups use `claude`.
             return ((Path.home() / ".claude").is_dir()
-                    or shutil.which("Muse") is not None)
+                    or shutil.which("Muse") is not None
+                    or shutil.which("claude") is not None)
         return (Path.home() / self.home_subdir).is_dir()
 
 
@@ -157,9 +186,10 @@ def status() -> dict:
     """Skill bundle + per-target install state (CLI and UI share this)."""
     try:
         src = skill_source_dir()
-        bundled = skill_version()
+        text = (src / SKILL_FILE).read_text(encoding="utf-8")
+        bundled = frontmatter_field(text, "version")
         found = True
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         src, bundled, found = None, "", False
     return {
         "skill": SKILL_NAME,
@@ -170,14 +200,40 @@ def status() -> dict:
     }
 
 
+def _copy_skill_tree(src: Path, dest: Path) -> None:
+    """Copy bundled skill files over dest, preserving user extras.
+
+    Never rmtree's the destination: force-updates used to delete user
+    edits and extra files, and rmtree crashes on symlinked skill dirs.
+    A stray symlink/file at dest is replaced with a real directory.
+    """
+    if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
+        dest.unlink()
+    dest.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        target = dest / item.name
+        if item.is_dir() and not item.is_symlink():
+            target.mkdir(exist_ok=True)
+            for sub in item.rglob("*"):
+                rel = sub.relative_to(item)
+                out = target / rel
+                if sub.is_dir() and not sub.is_symlink():
+                    out.mkdir(exist_ok=True)
+                elif sub.is_file() or sub.is_symlink():
+                    out.write_bytes(sub.read_bytes())
+        elif item.is_file() or item.is_symlink():
+            target.write_bytes(item.read_bytes())
+
+
 def install(target_ids: list[str] | None = None,
             force: bool = False) -> dict:
     """Copy the bundled skill into harness skill dirs.
 
     Installs to every known target unless ``target_ids`` narrows it.
     Existing installs are skipped unless ``force`` is set; installing is
-    what picks up a new bundled version. Per-target errors are recorded
-    without aborting the remaining targets.
+    what picks up a new bundled version. Updates overwrite bundled files
+    in place and leave user-added files alone. Per-target errors are
+    recorded without aborting the remaining targets.
     """
     src = skill_source_dir()  # raises FileNotFoundError when unavailable
     results: list[dict] = []
@@ -189,11 +245,38 @@ def install(target_ids: list[str] | None = None,
                                 "action": "skipped", "detail": "already installed"})
                 continue
             action = "updated" if dest.is_dir() else "installed"
-            if dest.is_dir():
-                shutil.rmtree(dest)
-            shutil.copytree(src, dest)
+            _copy_skill_tree(src, dest)
             results.append({"id": target.id, "path": str(dest),
                             "action": action, "detail": ""})
+        except OSError as e:
+            results.append({"id": target.id, "path": str(dest),
+                            "action": "error", "detail": str(e)})
+    return {"results": results}
+
+
+def uninstall(target_ids: list[str] | None = None) -> dict:
+    """Remove the procure skill from harness skill dirs.
+
+    Removes only the bundled SKILL.md (plus the directory when it becomes
+    empty); user-added files are left alone.
+    """
+    results: list[dict] = []
+    for target in _resolve_targets(target_ids):
+        dest = target.path()
+        try:
+            skill_file = dest / SKILL_FILE
+            if not skill_file.is_file():
+                results.append({"id": target.id, "path": str(dest),
+                                "action": "skipped",
+                                "detail": "not installed"})
+                continue
+            skill_file.unlink()
+            try:
+                dest.rmdir()  # only succeeds when nothing else is inside
+            except OSError:
+                pass
+            results.append({"id": target.id, "path": str(dest),
+                            "action": "removed", "detail": ""})
         except OSError as e:
             results.append({"id": target.id, "path": str(dest),
                             "action": "error", "detail": str(e)})
