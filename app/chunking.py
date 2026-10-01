@@ -3,7 +3,8 @@
 Splits on sentence boundaries first, then packs whole sentences into chunks of
 ~chunk_size chars with chunk_overlap chars of overlap (whole sentences only,
 so chunks never start or end mid-sentence, except hard-sliced overlong
-sentences). Drops chunks <50 chars.
+sentences). Drops chunks <50 chars, unless the whole input would vanish
+(a very short document is kept as chunk(s) so it stays ingestible).
 """
 from __future__ import annotations
 
@@ -32,7 +33,14 @@ def split_text(
         return []
     sentences = [s for s in _split_sentences(text) if s.strip()]
     chunks = _pack(sentences, chunk_size, chunk_overlap)
-    return [c for c in chunks if len(c.strip()) >= _MIN_CHUNK]
+    kept = [c for c in chunks if len(c.strip()) >= _MIN_CHUNK]
+    if kept:
+        return kept
+    # Everything fell below the junk-fragment floor: the whole input is a
+    # very short document (e.g. a BEIR stub like a disambiguation line).
+    # Keep it as chunk(s) so short-but-real content ingests instead of
+    # failing downstream with "No text extracted".
+    return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
 
 
 def _split_sentences(text: str) -> list[str]:

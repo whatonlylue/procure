@@ -180,6 +180,26 @@ class RunnerTest(unittest.TestCase):
                 "tags": [], "doc_type": "document",
             }])
 
+    def test_short_corpus_docs_ingest(self) -> None:
+        """BEIR stubs shorter than the chunk floor must not abort the run."""
+        corpus = [
+            {"doc_id": "stub", "filename": "stub.md",
+             "text": "List of cryptographers\n\nList of cryptographers.",
+             "tags": [], "doc_type": "document"},
+            {"doc_id": "lighthouse", "filename": "lighthouse.md",
+             "text": datasets.SAMPLE_CORPUS[0]["text"],
+             "tags": [], "doc_type": "document"},
+        ]
+        mapping = ingest_corpus(self.svc, corpus)
+        self.assertEqual(set(mapping), {"stub", "lighthouse"})
+        report = run_benchmark(
+            self.svc, corpus,
+            [{"query": "cryptographers list",
+              "relevant_doc_ids": ["stub"], "relevant_chunk_ids": []}],
+            (5,))
+        self.assertEqual(report.summary["num_queries"], 1)
+        self.assertEqual(report.summary["@5"]["recall"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
