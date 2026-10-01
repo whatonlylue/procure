@@ -1,9 +1,8 @@
 """Text extraction for supported file types.
 
 Dependency-free by default: OOXML (docx/pptx/xlsx), ODF (odt/ods/odp),
-and EPUB are all ZIP + XML under the hood, so they parse with stdlib —
-the same approach as the original docx/pptx extractors. Scanned PDFs
-and images need the optional ``ocr`` extra (see app/ocr.py).
+and EPUB are all ZIP + XML under the hood, so they parse with stdlib.
+Scanned PDFs and images need the optional ``ocr`` extra (see app/ocr.py).
 
 Legacy binary Office files (.doc/.xls/.ppt) are detected and rejected
 with conversion guidance: they need OLE parsing (or LibreOffice), which
@@ -12,10 +11,12 @@ is out of scope for the offline default.
 from __future__ import annotations
 
 import csv
-import io
+import html as _html
 import json
 import os
+import posixpath
 import re
+import urllib.parse
 import zipfile
 
 from app.ocr import IMAGE_EXTENSIONS
@@ -39,7 +40,10 @@ _LEGACY_OFFICE = {
     ".ppt": ".pptx",
 }
 
-# Caps keep pathological spreadsheets/feeds from exploding memory.
+# Output caps for row/string-heavy formats. CSV applies its cap while
+# streaming rows; XLSX stops parsing sheet rows past the cap; JSON stops
+# collecting strings past the cap. (The archive XML itself still parses
+# fully — the caps bound extracted text, not parser input.)
 _MAX_ROWS = 5000
 _MAX_JSON_STRINGS = 10000
 
@@ -62,7 +66,10 @@ def extract_text(path: str, filename: str, *, ocr_mode: str = "auto") -> str:
         return _extract_docx(path)
     if ext == ".pptx":
         return _extract_pptx(path)
-    if ext in (".html", ".htm", ".xml"):
+    if ext in (".html", ".htm"):
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return _strip_tags(_drop_script_style(f.read()))
+    if ext == ".xml":
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             return _strip_tags(f.read())
     if ext in (".csv", ".tsv"):
@@ -100,19 +107,31 @@ def _extract_pdf(path: str, ocr_mode: str) -> str:
     texts = [t.strip() for t in pages]
     thin = [i for i, t in enumerate(texts)
             if len(re.sub(r"\s+", "", t)) < THIN_PAGE_CHARS]
-    if thin and ocr_mode != "off" and available():
+    force_all = ocr_mode == "on"
+    ocr_targets = list(range(len(pages))) if force_all else thin
+    if ocr_targets and ocr_mode != "off" and available():
         try:
-            ocr = ocr_pdf_pages(path, thin)
-        except Exception:  # noqa: BLE001 - OCR failure keeps pdftotext
+            ocr = ocr_pdf_pages(path, ocr_targets)
+        except Exception:  # OCR failure keeps pdftotext
             ocr = {}
         for i, text in ocr.items():
             if text.strip():
                 texts[i] = f"{texts[i]}\n\n{text.strip()}".strip()
     body = "\n\n".join(t for t in texts if t)
-    if not body and thin and len(pages) > 0 and not available():
+    if not body and thin and pages:
+        if not available():
+            raise ValueError(
+                "No text found — this looks like a scanned PDF. "
+                "Install OCR support (uv pip install -e '.[ocr]') and retry"
+            )
+        if ocr_mode == "off":
+            raise ValueError(
+                "No text found — this looks like a scanned PDF, but OCR is "
+                "disabled (PROCURE_OCR=off). Set it to auto and retry"
+            )
         raise ValueError(
-            "No text found — this looks like a scanned PDF. "
-            "Install OCR support (uv pip install -e '.[ocr]') and retry"
+            "No text found — this looks like a scanned PDF, but OCR "
+            "returned no text for its pages"
         )
     return body
 
@@ -127,23 +146,41 @@ def _extract_image(path: str, ocr_mode: str) -> str:
     return ocr_image(path)
 
 
-# -- docx / pptx (unchanged OOXML zip parsing) -------------------------------
+# -- docx / pptx (OOXML zip parsing, stdlib) ----------------------------------
 
 
 def _extract_docx(path: str) -> str:
     with zipfile.ZipFile(path) as z:
-        xml = z.read("word/document.xml").decode("utf-8", errors="ignore")
-    xml = re.sub(r"</w:p[^>]*>", "\n\n", xml)
-    return _strip_tags(xml)
+        names = set(z.namelist())
+        parts = [_para_breaks(z.read("word/document.xml")
+                              .decode("utf-8", errors="ignore"))]
+        # Headers, footers, footnotes, and comments carry real content too.
+        for name in sorted(names):
+            if re.fullmatch(r"word/(header\d+|footer\d+|footnotes|comments)\.xml",
+                            name):
+                parts.append(_para_breaks(
+                    z.read(name).decode("utf-8", errors="ignore")))
+    return "\n\n".join(t for t in (_strip_tags(p) for p in parts) if t)
+
+
+def _para_breaks(xml: str) -> str:
+    # Exact </w:p>: the looser </w:p[^>]*> also matches </w:pPr>.
+    return re.sub(r"</w:p\s*>", "\n\n", xml)
 
 
 def _extract_pptx(path: str) -> str:
+    def slide_no(name: str) -> int:
+        m = re.fullmatch(r"ppt/slides/slide(\d+)\.xml", name)
+        return int(m.group(1)) if m else 1 << 30
+
     texts: list[str] = []
     with zipfile.ZipFile(path) as z:
-        for name in sorted(z.namelist()):
-            if re.fullmatch(r"ppt/slides/slide\d+\.xml", name):
-                xml = z.read(name).decode("utf-8", errors="ignore")
-                texts.append(_strip_tags(xml))
+        names = [n for n in z.namelist()
+                 if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)]
+        # Numeric sort: lexicographic order gives slide1, slide10, slide2.
+        for name in sorted(names, key=slide_no):
+            xml = z.read(name).decode("utf-8", errors="ignore")
+            texts.append(_strip_tags(xml))
     return "\n\n".join(texts)
 
 
@@ -151,6 +188,7 @@ def _extract_pptx(path: str) -> str:
 
 
 def _extract_csv(path: str, ext: str) -> str:
+    lines: list[str] = []
     with open(path, "r", encoding="utf-8-sig", errors="ignore", newline="") as f:
         sample = f.read(8192)
         f.seek(0)
@@ -158,9 +196,15 @@ def _extract_csv(path: str, ext: str) -> str:
             dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
         except csv.Error:
             dialect = csv.excel_tab if ext == ".tsv" else csv.excel
-        rows = [[c.strip() for c in row] for row in csv.reader(f, dialect)]
-    lines = [" | ".join(r).strip(" |") for r in rows]
-    lines = [ln for ln in lines if ln][: _MAX_ROWS]
+        # Stream: stop reading once the cap is hit, instead of parsing the
+        # whole file and truncating afterwards.
+        for row in csv.reader(f, dialect):
+            line = " | ".join(c.strip() for c in row).strip(" |")
+            if not line:
+                continue
+            lines.append(line)
+            if len(lines) >= _MAX_ROWS:
+                break
     return "\n".join(lines)
 
 
@@ -177,6 +221,25 @@ def _col_index(cell_ref: str) -> int:
     for ch in letters:
         idx = idx * 26 + (ord(ch) - ord("A") + 1)
     return idx - 1
+
+
+# Built-in Excel date/time number formats (serials render as ISO dates).
+_DATE_FMT_IDS = frozenset(
+    list(range(14, 23)) + list(range(27, 37)) + [45, 46, 47, 50, 57]
+)
+
+
+def _excel_serial_to_iso(serial: float, date1904: bool) -> str:
+    import datetime as _dt
+
+    base = _dt.datetime(1904, 1, 1) if date1904 else _dt.datetime(1899, 12, 30)
+    try:
+        moment = base + _dt.timedelta(days=serial)
+    except (OverflowError, ValueError):
+        return str(serial)
+    if serial % 1:
+        return moment.strftime("%Y-%m-%d %H:%M")
+    return moment.strftime("%Y-%m-%d")
 
 
 def _extract_xlsx(path: str) -> str:
@@ -197,6 +260,37 @@ def _extract_xlsx(path: str) -> str:
             wb = ET.fromstring(z.read("xl/workbook.xml"))
         except KeyError:
             return ""
+        date1904 = any(_local(el.tag) == "workbookPr"
+                       and el.get("date1904") == "1" for el in wb.iter())
+        # Column styles: which style indexes render as dates.
+        date_styles: set[int] = set()
+        try:
+            styles = ET.fromstring(z.read("xl/styles.xml"))
+            num_fmts: dict[str, str] = {}
+            for el in styles.iter():
+                if _local(el.tag) == "numFmt":
+                    num_fmts[el.get("numFmtId", "")] = el.get("formatCode", "")
+            # Only cellXfs entries are addressable via a cell's s attribute
+            # (cellStyleXfs indexes are a different list).
+            xfs: list = []
+            for el in styles.iter():
+                if _local(el.tag) == "cellXfs":
+                    xfs = [c for c in el if _local(c.tag) == "xf"]
+                    break
+            for i, xf in enumerate(xfs):
+                fmt_id = xf.get("numFmtId", "0")
+                try:
+                    is_date = int(fmt_id) in _DATE_FMT_IDS
+                except ValueError:
+                    is_date = False
+                if not is_date and fmt_id in num_fmts:
+                    code = num_fmts[fmt_id].lower()
+                    is_date = any(tok in code for tok in
+                                  ("y", "m", "d", "h", "s"))
+                if is_date:
+                    date_styles.add(i)
+        except KeyError:
+            pass
         try:
             rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
         except KeyError:
@@ -223,43 +317,66 @@ def _extract_xlsx(path: str) -> str:
         for name, ws_path in sheets:
             if ws_path not in names:
                 continue
-            root = ET.fromstring(z.read(ws_path))
-            rows: dict[int, dict[int, str]] = {}
-            for row in root.iter():
-                if _local(row.tag) != "row":
-                    continue
-                try:
-                    rno = int(row.get("r", "0"))
-                except ValueError:
-                    continue
-                for c in row:
-                    if _local(c.tag) != "c":
+            lines: list[str] = []
+            # iterparse + element clearing keeps memory flat; stop early
+            # once the row cap is hit.
+            with z.open(ws_path) as fh:
+                ctx = ET.iterparse(fh, events=("end",))
+                for _, elem in ctx:
+                    if _local(elem.tag) != "row":
                         continue
-                    ctype = c.get("t", "")
-                    val = ""
-                    if ctype == "s":
-                        for v in c:
-                            if _local(v.tag) == "v":
+                    cells: dict[int, str] = {}
+                    for c in elem:
+                        if _local(c.tag) != "c":
+                            continue
+                        ctype = c.get("t", "")
+                        val = ""
+                        if ctype == "s":
+                            for v in c:
+                                if _local(v.tag) == "v":
+                                    try:
+                                        val = shared[int((v.text or "").strip())]
+                                    except (ValueError, IndexError):
+                                        val = ""
+                        elif ctype == "inlineStr":
+                            val = "".join((t.text or "") for t in c.iter()
+                                           if _local(t.tag) == "t")
+                        elif ctype == "b":
+                            raw_b = "".join(v.text or "" for v in c
+                                            if _local(v.tag) == "v").strip()
+                            val = "FALSE" if raw_b in ("", "0") else "TRUE"
+                        elif ctype in ("e", "str", ""):
+                            for v in c:
+                                if _local(v.tag) == "v":
+                                    val = (v.text or "").strip()
+                            if ctype == "" and val:
                                 try:
-                                    val = shared[int((v.text or "").strip())]
-                                except (ValueError, IndexError):
-                                    val = ""
-                    elif ctype == "inlineStr":
-                        val = "".join((t.text or "") for t in c.iter()
-                                       if _local(t.tag) == "t")
-                    else:
-                        for v in c:
-                            if _local(v.tag) == "v":
-                                val = (v.text or "").strip()
-                    val = val.strip()
-                    if val:
-                        rows.setdefault(rno, {})[_col_index(c.get("r", "A"))] = val
-            lines = []
-            for rno in sorted(rows)[: _MAX_ROWS]:
-                cells = rows[rno]
-                width = max(cells) + 1 if cells else 0
-                lines.append(" | ".join(cells.get(i, "") for i in range(width)).rstrip(" |"))
-            body = "\n".join(ln for ln in lines if ln.strip())
+                                    style = int(c.get("s", "-1"))
+                                except ValueError:
+                                    style = -1
+                                if style in date_styles:
+                                    try:
+                                        val = _excel_serial_to_iso(float(val), date1904)
+                                    except ValueError:
+                                        pass
+                        else:
+                            for v in c:
+                                if _local(v.tag) == "v":
+                                    val = (v.text or "").strip()
+                        val = val.strip()
+                        if val:
+                            cells[_col_index(c.get("r", "A"))] = val
+                    if cells:
+                        width = max(cells) + 1
+                        line = (" | ".join(cells.get(i, "") for i in range(width))
+                                .rstrip(" |"))
+                        if line.strip():
+                            lines.append(line)
+                            if len(lines) >= _MAX_ROWS:
+                                elem.clear()
+                                break
+                    elem.clear()
+            body = "\n".join(lines)
             if body:
                 out.append(f"# {name}\n{body}")
         return "\n\n".join(out)
@@ -268,21 +385,38 @@ def _extract_xlsx(path: str) -> str:
 # -- epub (stdlib zip + spine order) -----------------------------------------
 
 
+_ATTR_RE_CACHE: dict[str, re.Pattern] = {}
+
+
+def _attr(tag: str, name: str) -> str:
+    """Single XML attribute value; accepts single or double quotes."""
+    pat = _ATTR_RE_CACHE.get(name)
+    if pat is None:
+        pat = re.compile(rf"{re.escape(name)}\s*=\s*(['\"])(.*?)\1")
+        _ATTR_RE_CACHE[name] = pat
+    m = pat.search(tag)
+    return m.group(2) if m else ""
+
+
+def _html_para_breaks(raw: str) -> str:
+    return re.sub(r"</(h[1-6]|p)[^>]*>", "\n\n", raw, flags=re.IGNORECASE)
+
+
 def _extract_epub(path: str) -> str:
     with zipfile.ZipFile(path) as z:
         names = set(z.namelist())
         opf_path = "content.opf"
         if "META-INF/container.xml" in names:
             container = z.read("META-INF/container.xml").decode("utf-8", errors="ignore")
-            m = re.search(r'full-path="([^"]+)"', container)
+            m = re.search(r'full-path=(["\'])(.*?)\1', container)
             if m:
-                opf_path = m.group(1)
+                opf_path = m.group(2)
         if opf_path not in names:
             # Fallback: every xhtml/html file in the archive.
             docs = sorted(n for n in names
                           if n.lower().endswith((".xhtml", ".html", ".htm")))
-            return "\n\n".join(_strip_tags(
-                z.read(n).decode("utf-8", errors="ignore")) for n in docs).strip()
+            return "\n\n".join(_strip_tags(_html_para_breaks(
+                z.read(n).decode("utf-8", errors="ignore"))) for n in docs).strip()
         base = opf_path.rsplit("/", 1)[0] + "/" if "/" in opf_path else ""
         opf = z.read(opf_path).decode("utf-8", errors="ignore")
         title = ""
@@ -292,12 +426,13 @@ def _extract_epub(path: str) -> str:
         items = {}
         for m in re.finditer(r"<item\s+[^>]*>", opf):
             tag = m.group(0)
-            idm = re.search(r'id="([^"]+)"', tag)
-            hrefm = re.search(r'href="([^"]+)"', tag)
-            if idm and hrefm:
-                items[idm.group(1)] = hrefm.group(1)
-        spine = [m.group(1) for m in
-                 re.finditer(r'<itemref[^>]*idref="([^"]+)"', opf)]
+            item_id = _attr(tag, "id")
+            href = _attr(tag, "href")
+            if item_id and href:
+                items[item_id] = href
+        spine = [_attr(m.group(0), "idref")
+                 for m in re.finditer(r"<itemref\s+[^>]*>", opf)]
+        spine = [s for s in spine if s]
         if not spine:
             spine = list(items)
         sections = []
@@ -305,12 +440,13 @@ def _extract_epub(path: str) -> str:
             href = items.get(idref, "")
             if not href or not href.lower().endswith((".xhtml", ".html", ".htm")):
                 continue
-            full = base + href
+            # Hrefs may be URL-encoded (%20) or relative (../Text/ch1.xhtml).
+            full = posixpath.normpath(posixpath.join(
+                base, urllib.parse.unquote(href)))
             if full not in names:
                 continue
             raw = z.read(full).decode("utf-8", errors="ignore")
-            raw = re.sub(r"</(h[1-6]|p)[^>]*>", "\n\n", raw, flags=re.IGNORECASE)
-            text = _strip_tags(raw)
+            text = _strip_tags(_html_para_breaks(raw))
             if text:
                 sections.append(text)
         body = "\n\n".join(sections)
@@ -323,7 +459,10 @@ def _extract_epub(path: str) -> str:
 def _extract_odf(path: str) -> str:
     with zipfile.ZipFile(path) as z:
         xml = z.read("content.xml").decode("utf-8", errors="ignore")
-    xml = re.sub(r"</text:h[^>]*>", "\n\n# ", xml)
+    # "# " goes at the OPENING heading tag: appending it at the close would
+    # prefix the paragraph AFTER the heading instead.
+    xml = re.sub(r"<text:h[^>]*>", "# ", xml)
+    xml = re.sub(r"</text:h[^>]*>", "\n\n", xml)
     xml = re.sub(r"</text:p[^>]*>", "\n\n", xml)
     xml = re.sub(r"</table:table-row[^>]*>", "\n", xml)
     xml = re.sub(r"</table:table-cell[^>]*>", " | ", xml)
@@ -336,10 +475,26 @@ def _extract_odf(path: str) -> str:
 
 _SKIP_GROUPS = {"fonttbl", "colortbl", "stylesheet", "info", "pict"}
 
+_CTRL_WORD = re.compile(r"\\([a-z]+)(-?\d+)?[ ]?")
+_CTRL_HEX = re.compile(r"\\'([0-9a-fA-F]{2})")
+_SKIP_OPEN = re.compile(r"\{\\[*]?([a-z]+)")
+_CODEPAGE = re.compile(r"\\ansicpg(\d+)")
+
 
 def _extract_rtf(path: str) -> str:
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         raw = f.read()
+    # \'hh bytes use the declared ANSI codepage when present.
+    encoding = "latin1"
+    m = _CODEPAGE.search(raw[:2000])
+    if m:
+        try:
+            import codecs
+
+            codecs.lookup(f"cp{m.group(1)}")
+            encoding = f"cp{m.group(1)}"
+        except LookupError:
+            pass
     out: list[str] = []
     i, n = 0, len(raw)
     skip_depth = 0
@@ -347,10 +502,13 @@ def _extract_rtf(path: str) -> str:
     while i < n:
         ch = raw[i]
         if ch == "{":
-            # Look ahead for a skip-group destination.
-            m = re.match(r"\{\\[*]?([a-z]+)", raw[i:i + 20])
+            # Look ahead for a skip-group destination. {\* ...} groups are
+            # ignorable by definition (themedata, generator, rsidtbl...).
+            m = _SKIP_OPEN.match(raw, i, min(n, i + 24))
             depth += 1
-            if m and m.group(1) in _SKIP_GROUPS and skip_depth == 0:
+            if skip_depth == 0 and raw[i + 1:i + 3] == "\\*":
+                skip_depth = depth
+            elif m and m.group(1) in _SKIP_GROUPS and skip_depth == 0:
                 skip_depth = depth
             i += 1
             continue
@@ -364,7 +522,7 @@ def _extract_rtf(path: str) -> str:
             i += 1
             continue
         if ch == "\\":
-            m = re.match(r"\\([a-z]+)(-?\d+)?[ ]?", raw[i:])
+            m = _CTRL_WORD.match(raw, i)
             if m:
                 word = m.group(1)
                 if word in ("par", "line"):
@@ -383,9 +541,10 @@ def _extract_rtf(path: str) -> str:
                     continue
                 i += len(m.group(0))
                 continue
-            m = re.match(r"\\'([0-9a-fA-F]{2})", raw[i:])
+            m = _CTRL_HEX.match(raw, i)
             if m:
-                out.append(bytes([int(m.group(1), 16)]).decode("latin1"))
+                out.append(bytes([int(m.group(1), 16)]).decode(
+                    encoding, errors="ignore"))
                 i += 4
                 continue
             if i + 1 < n and raw[i + 1] in ("\\", "{", "}"):
@@ -414,26 +573,35 @@ def _extract_json(path: str) -> str:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return raw.strip()
+    # Iterative walk with a depth cap: recursion would hit RecursionError
+    # on deeply nested documents.
     strings: list[str] = []
-
-    def walk(node) -> None:
-        if len(strings) >= _MAX_JSON_STRINGS:
-            return
+    stack: list[tuple[object, int]] = [(data, 0)]
+    while stack and len(strings) < _MAX_JSON_STRINGS:
+        node, depth = stack.pop()
         if isinstance(node, str):
             if node.strip():
                 strings.append(node.strip())
+        elif depth >= 100:
+            continue
         elif isinstance(node, dict):
-            for v in node.values():
-                walk(v)
+            stack.extend((v, depth + 1) for v in reversed(list(node.values())))
         elif isinstance(node, list):
-            for v in node:
-                walk(v)
-
-    walk(data)
+            stack.extend((v, depth + 1) for v in reversed(node))
     return "\n\n".join(strings) if strings else raw.strip()
 
 
 # -- shared helpers ----------------------------------------------------------
+
+
+def _drop_script_style(page: str) -> str:
+    """Remove script/style blocks (code and CSS are not document text)."""
+    return re.sub(
+        r"<(script|style)[^>]*>.*?</\1\s*>",
+        " ",
+        page,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
 
 
 _GB_START = "*** START OF THE PROJECT GUTENBERG EBOOK"
@@ -456,6 +624,9 @@ def _strip_boilerplate(text: str) -> str:
 
 def _strip_tags(xml: str) -> str:
     text = re.sub(r"<[^>]+>", " ", xml)
+    # Entities (&amp;, &#8217;, &lt; ...) decode AFTER tag stripping so
+    # literal "&lt;tag&gt;" text can't turn into a stripped tag.
+    text = _html.unescape(text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
     return text.strip()
