@@ -9,9 +9,6 @@ import {
   McpTool,
   SkillStatus,
   TagCount,
-  WatchFolder,
-  addUrl,
-  addWatch,
   cancelJob,
   deleteDoc,
   exportLibrary,
@@ -22,7 +19,6 @@ import {
   libraryVersion,
   listDocs,
   listTags,
-  listWatches,
   mcpLogs,
   mcpStart,
   mcpStatus,
@@ -30,12 +26,10 @@ import {
   mcpTools,
   patchDoc,
   reingestDoc,
-  removeWatch,
   rerankIsOff,
   search,
   setDocTags,
   skillsStatus,
-  syncWatches,
   updateSettings,
   uploadFilesAsync,
   workspaceLogs,
@@ -75,23 +69,6 @@ function toggleInSet(setter: (f: (s: Set<string>) => Set<string>) => void, id: s
     else n.add(id);
     return n;
   });
-}
-
-function isTauri(): boolean {
-  return typeof window !== "undefined" && "__TAURI__" in window;
-}
-
-async function pickFolder(): Promise<string | null> {
-  // Native picker under Tauri (dialog plugin, open with directory mode);
-  // the typed path stays as the fallback everywhere else.
-  const tauri = (window as unknown as { __TAURI__?: { core: { invoke: (cmd: string, args?: unknown) => Promise<unknown> } } }).__TAURI__;
-  if (!tauri) return null;
-  const res = await tauri.core.invoke("plugin:dialog|open", {
-    options: { directory: true, multiple: false, title: "Watch a folder" },
-  });
-  if (typeof res === "string") return res;
-  if (Array.isArray(res) && typeof res[0] === "string") return res[0] as string;
-  return null;
 }
 
 const GREETINGS = [
@@ -151,7 +128,6 @@ export default function App() {
   const [filterTags, setFilterTags] = useState<Set<string>>(new Set());
   const [scopeDocs, setScopeDocs] = useState<Set<string>>(new Set());
   const [scopeFilter, setScopeFilter] = useState("");
-  const [scopeSource, setScopeSource] = useState("");
   const [scopeDocType, setScopeDocType] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [greeting] = useState<string>(pickGreeting);
@@ -163,15 +139,7 @@ export default function App() {
   const [libType, setLibType] = useState("");
   const [libPage, setLibPage] = useState(0);
   // Sources tab.
-  const [url, setUrl] = useState("");
-  const [urlTags, setUrlTags] = useState("");
-  const [urlDocType, setUrlDocType] = useState("document");
   const [uploadDocType, setUploadDocType] = useState("document");
-  const [watches, setWatches] = useState<WatchFolder[]>([]);
-  const [lastScan, setLastScan] = useState<string | null>(null);
-  const [watchPath, setWatchPath] = useState("");
-  const [watchRecursive, setWatchRecursive] = useState(true);
-  const [watchDeleteDocs, setWatchDeleteDocs] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -219,13 +187,12 @@ export default function App() {
   const refresh = useCallback(async () => {
     refreshing.current = true;
     try {
-      const [lib, scope, h, m, t, w, v] = await Promise.all([
+      const [lib, scope, h, m, t, v] = await Promise.all([
         listDocs({ query: libQuery || undefined, sort: libSort, docType: libType || undefined, limit: LIB_PAGE_SIZE, offset: libPage * LIB_PAGE_SIZE }),
         listDocs({ limit: SCOPE_FETCH_MAX, sort: "newest" }),
         fetchHealth(),
         mcpStatus(),
         listTags(),
-        listWatches(),
         libraryVersion(),
       ]);
       libVersion.current = JSON.stringify(v);
@@ -236,18 +203,14 @@ export default function App() {
       setBackend(h);
       setMcp(m);
       setTags(t);
-      setWatches(w.folders);
-      setLastScan(w.last_scan);
-      // Prune filters that no longer resolve: vanished tags, sources, and
-      // deleted docs used to leave invisible filters (or dead scope ids)
-      // that silently returned nothing.
+      // Prune filters that no longer resolve: vanished tags and deleted
+      // docs used to leave invisible filters (or dead scope ids) that
+      // silently returned nothing.
       const tagNames = new Set(t.map((x) => x.tag));
       setFilterTags((prev) => new Set([...prev].filter((x) => tagNames.has(x))));
       const ids = new Set(scope.documents.map((d) => d.doc_id));
       setScopeDocs((prev) => new Set([...prev].filter((x) => ids.has(x))));
       setSelected((prev) => new Set([...prev].filter((x) => ids.has(x))));
-      const sources = new Set(scope.documents.map((d) => d.source).filter(Boolean));
-      setScopeSource((prev) => (prev && !sources.has(prev) ? "" : prev));
     } catch (e) {
       setNotice(String(e));
     } finally {
@@ -470,7 +433,6 @@ export default function App() {
       const res = await search(query, topK, {
         docIds: scopeDocs.size ? [...scopeDocs] : undefined,
         tags: filterTags.size ? [...filterTags] : undefined,
-        source: scopeSource || undefined,
         docType: scopeDocType || undefined,
       });
       setHits(res);
@@ -599,85 +561,6 @@ export default function App() {
     }
   }
 
-  async function handleAddUrl(e: React.FormEvent) {
-    e.preventDefault();
-    if (!url.trim() || busy) return;
-    setBusy("Fetching URL…");
-    setNotice("");
-    try {
-      const doc = await addUrl(url.trim(), parseTags(urlTags), urlDocType);
-      setUrl("");
-      setUrlTags("");
-      if (doc.status === "failed") {
-        notifyError(`Failed: ${doc.error}`);
-      } else if (doc.status === "duplicate") {
-        notify(`Already in library as ${doc.filename}.`, "info");
-      } else {
-        notify(`Added ${doc.filename} (${doc.chunk_count} chunks).`, "success");
-      }
-      await refresh();
-    } catch (e) {
-      setNotice(String(e));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function handleAddWatch(e: React.FormEvent) {
-    e.preventDefault();
-    if (!watchPath.trim() || busy) return;
-    setBusy("Adding watch…");
-    setNotice("");
-    try {
-      await addWatch(watchPath.trim(), watchRecursive);
-      setWatchPath("");
-      const j = await syncWatches();
-      setJob(j);
-      pollJob(j.job_id);
-      setBusy("");
-      await refresh();
-    } catch (e) {
-      setBusy("");
-      setNotice(String(e));
-    }
-  }
-
-  async function handleBrowseWatch() {
-    setNotice("");
-    try {
-      const picked = await pickFolder();
-      if (picked) setWatchPath(picked);
-      else if (!isTauri()) setNotice("Folder picker needs the desktop app — type the path instead.");
-    } catch {
-      setNotice("Folder picker unavailable — type the path instead.");
-    }
-  }
-
-  async function handleRemoveWatch(id: number, path: string) {
-    setNotice("");
-    try {
-      if (watchDeleteDocs) {
-        if (!window.confirm("Remove this watch and delete its documents?")) return;
-      }
-      await removeWatch(id, watchDeleteDocs);
-      await refresh();
-    } catch (e) {
-      setNotice(String(e));
-    }
-  }
-
-  async function handleSyncWatches() {
-    if (busy) return;
-    setNotice("");
-    try {
-      const j = await syncWatches();
-      setJob(j);
-      pollJob(j.job_id);
-    } catch (e) {
-      setNotice(String(e));
-    }
-  }
-
   async function handleExport() {
     setNotice("");
     try {
@@ -716,7 +599,7 @@ export default function App() {
 
   const ready = scopeList.filter((d) => d.status === "ready").length;
   const hasSearched = searched !== "";
-  const activeFilterCount = filterTags.size + scopeDocs.size + (scopeSource ? 1 : 0) + (scopeDocType ? 1 : 0);
+  const activeFilterCount = filterTags.size + scopeDocs.size + (scopeDocType ? 1 : 0);
   const searchMode = (backend?.search ?? "hybrid").toLowerCase() === "dense" ? "dense" : "hybrid";
   const mode = searchMode === "hybrid" ? "Keywords + meaning" : "Meaning only";
   const off = rerankIsOff(backend?.rerank);
@@ -735,7 +618,6 @@ export default function App() {
       return !["tif", "tiff", "bmp", "webp", "xlsm", "xltx", "htm", "markdown", "textile", "nfo"].includes(f);
     })
     .join(" / ");
-  const sources = [...new Set(scopeList.map((d) => d.source).filter(Boolean))].sort();
   const scopeShown = scopeFilter
     ? scopeList.filter((d) => d.filename.toLowerCase().includes(scopeFilter.toLowerCase()))
     : scopeList;
@@ -758,7 +640,6 @@ export default function App() {
             <button key={t.id} className={tab === t.id ? "on" : ""} onClick={() => setTab(t.id)}>
               <span className="key">{t.key}</span> {t.label}
               {t.id === "library" && <span className="count mono">{docsTotal}</span>}
-              {t.id === "sources" && watches.length > 0 && <span className="count mono">{watches.length}</span>}
               {t.id === "mcp" && mcp?.running && <span className="dot" title="MCP server running" />}
             </button>
           ))}
@@ -808,7 +689,7 @@ export default function App() {
           <div className="progress" role="status">
             <div className="progress-row mono">
               <span>
-                {job.kind === "watch-sync" ? "SYNC" : job.total > 0 ? `FILE ${Math.min(job.done + 1, job.total)}/${job.total}` : job.label.toUpperCase()}
+                {job.total > 0 ? `FILE ${Math.min(Math.floor(job.done) + 1, job.total)}/${job.total}` : job.label.toUpperCase()}
               </span>
               <span className="truncate">{job.current || job.label}</span>
               <span>{job.total > 0 ? `${jobPct}%` : "…"}</span>
@@ -899,20 +780,6 @@ export default function App() {
                       </span>
                     </label>
                     <label className="ctl">
-                      <span>SOURCE</span>
-                      <select
-                        className="mono"
-                        value={scopeSource}
-                        onChange={(e) => setScopeSource(e.target.value)}
-                        aria-label="Filter by document source"
-                      >
-                        <option value="">All</option>
-                        {sources.map((s) => (
-                          <option key={s} value={s}>{s}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="ctl">
                       <span>TYPE</span>
                       <select
                         className="mono"
@@ -991,7 +858,6 @@ export default function App() {
               <p className="resultmeta mono">
                 {hits.length} RESULT{hits.length === 1 ? "" : "S"} FOR “{searched}”
                 {filterTags.size > 0 && ` · TAG: ${[...filterTags].join(", ")}`}
-                {scopeSource && ` · SRC: ${scopeSource}`}
                 {scopeDocType && ` · TYPE: ${scopeDocType === "memory" ? "memories" : scopeDocType}`}
                 {scopeDocs.size > 0 && ` · ${scopeDocs.size} DOC${scopeDocs.size === 1 ? "" : "S"}`}
               </p>
@@ -1118,7 +984,7 @@ export default function App() {
                         aria-label={`select ${d.filename}`}
                       />
                     </td>
-                    <td className="file">{d.filename}<span className="docid mono">{d.doc_id} · {d.source || "upload"}{(d.doc_type || "document") === "memory" ? " · memory" : ""}</span></td>
+                    <td className="file">{d.filename}<span className="docid mono">{d.doc_id}{(d.doc_type || "document") === "memory" ? " · memory" : ""}</span></td>
                     <td>
                       <span className={`pill mono ${d.status}`}>{d.status.toUpperCase()}</span>
                       {d.error && <span className="err"> — {d.error}</span>}
@@ -1223,98 +1089,6 @@ export default function App() {
               </label>
             </div>
 
-            <div className="resultmeta mono">ADD FROM URL</div>
-            <form className="urlform" onSubmit={handleAddUrl}>
-              <input
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://example.com/article"
-                aria-label="URL to ingest"
-              />
-              <input
-                className="mono"
-                value={urlTags}
-                onChange={(e) => setUrlTags(e.target.value)}
-                placeholder="tags, comma separated"
-                aria-label="Tags for this URL"
-              />
-              <label className="ctl">
-                <span>TYPE</span>
-                <select
-                  className="mono"
-                  value={urlDocType}
-                  onChange={(e) => setUrlDocType(e.target.value)}
-                  aria-label="Type for this URL"
-                >
-                  <option value="document">Document</option>
-                  <option value="memory">Memory</option>
-                </select>
-              </label>
-              <button type="submit" className="primary" disabled={!url.trim() || !!busy}>Add URL</button>
-            </form>
-
-            <div className="resultmeta mono">WATCHED FOLDERS</div>
-            <form className="urlform" onSubmit={handleAddWatch}>
-              <input
-                className="mono"
-                value={watchPath}
-                onChange={(e) => setWatchPath(e.target.value)}
-                placeholder="/absolute/path/to/folder"
-                aria-label="Folder path to watch"
-              />
-              <button type="button" onClick={handleBrowseWatch} title="Pick a folder (desktop app)">Browse…</button>
-              <label className="ctl check">
-                <input
-                  type="checkbox"
-                  checked={watchRecursive}
-                  onChange={(e) => setWatchRecursive(e.target.checked)}
-                />
-                Recursive
-              </label>
-              <button type="submit" disabled={!watchPath.trim() || !!busy}>Watch</button>
-              <button type="button" onClick={handleSyncWatches} disabled={!watches.length || !!busy}>
-                Sync now
-              </button>
-            </form>
-            {lastScan && <p className="side-hint mono">Last scan: {lastScan}</p>}
-            {watches.length > 0 ? (
-              <table className="lib">
-                <thead>
-                  <tr>
-                    <th>Path</th>
-                    <th>Recursive</th>
-                    <th>Files</th>
-                    <th>Last sync</th>
-                    <th>Status</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {watches.map((w) => (
-                    <tr key={w.id}>
-                      <td className="mono">{w.path}</td>
-                      <td className="mono">{w.recursive ? "yes" : "no"}</td>
-                      <td className="mono">{w.file_count ?? "—"}</td>
-                      <td className="mono">{w.last_sync || "—"}</td>
-                      <td>{w.last_error ? <span className="err">{w.last_error}</span> : <span className="mono dim">ok</span>}</td>
-                      <td className="acts">
-                        <label className="ctl check" title="Also delete this folder's documents">
-                          <input
-                            type="checkbox"
-                            checked={watchDeleteDocs}
-                            onChange={(e) => setWatchDeleteDocs(e.target.checked)}
-                          />
-                          docs
-                        </label>
-                        <button className="danger" onClick={() => handleRemoveWatch(w.id, w.path)}>Remove</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <p className="empty">No watched folders. Add one above — new files ingest automatically, edits re-ingest in place, deletions mark docs missing.</p>
-            )}
           </main>
         ) : (
           <main>

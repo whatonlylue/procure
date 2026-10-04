@@ -1,4 +1,4 @@
-"""Coverage for new extractors, dedup, tags, jobs, URL ingest, and watch.
+"""Coverage for new extractors, dedup, tags, and jobs.
 
 Stdlib unittest only (no new harness). Run from the project root:
 
@@ -12,11 +12,11 @@ import unittest
 import zipfile
 from unittest import mock
 
-from app import extract, webfetch
+from app import extract
 from app.config import Settings
 from app.jobs import JobManager
 from app.service import RAGService
-from app.watch import WatchManager
+from stub_embedder import StubEmbedder
 
 TEXT_A = (
     "Lighthouse maintenance log. The north beacon was relamped in March. "
@@ -182,7 +182,7 @@ class ExtractTest(unittest.TestCase):
 class DedupTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.svc = RAGService(_settings(self.tmp.name))
+        self.svc = RAGService(_settings(self.tmp.name), embedder=StubEmbedder())
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -210,7 +210,7 @@ class DedupTest(unittest.TestCase):
 class TagsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.svc = RAGService(_settings(self.tmp.name))
+        self.svc = RAGService(_settings(self.tmp.name), embedder=StubEmbedder())
         self.a = self.svc.ingest_text("a.md", TEXT_A, ["Memory", "boats"])["doc_id"]
         self.b = self.svc.ingest_text("b.md", TEXT_B, ["boats"])["doc_id"]
 
@@ -234,11 +234,6 @@ class TagsTest(unittest.TestCase):
 
     def test_search_unknown_tag_returns_nothing(self) -> None:
         self.assertEqual(self.svc.search("beacon", tags=["nope"]), [])
-
-    def test_search_source_filter(self) -> None:
-        hits = self.svc.search("beacon", source="text")
-        self.assertTrue(hits)
-        self.assertEqual(self.svc.search("beacon", source="url"), [])
 
     def test_set_tags_replaces(self) -> None:
         out = self.svc.set_tags(self.a, ["Harbor"])
@@ -280,91 +275,6 @@ class JobsTest(unittest.TestCase):
             self.assertIn("kaput", done["error"])
         finally:
             mgr.shutdown()
-
-
-class UrlIngestTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.svc = RAGService(_settings(self.tmp.name))
-
-    def tearDown(self) -> None:
-        self.tmp.cleanup()
-
-    def test_ingest_url_happy_path(self) -> None:
-        with mock.patch.object(
-            webfetch, "fetch_url_text",
-            return_value=("Tide News", TEXT_B),
-        ):
-            res = self.svc.ingest_url("https://example.com/tides", ["news"])
-        self.assertEqual(res["status"], "ready")
-        doc = self.svc.get_document(res["doc_id"])
-        self.assertEqual(doc["source"], "url")
-        self.assertEqual(doc["source_uri"], "https://example.com/tides")
-        self.assertEqual(doc["tags"], ["news"])
-        hits = self.svc.search("ferry departures", tags=["news"])
-        self.assertTrue(hits)
-
-    def test_ingest_url_fetch_failure(self) -> None:
-        with mock.patch.object(
-            webfetch, "fetch_url_text",
-            side_effect=RuntimeError("Could not fetch x"),
-        ):
-            res = self.svc.ingest_url("https://example.com/x")
-        self.assertEqual(res["status"], "failed")
-        self.assertIn("Could not fetch", res["error"])
-
-    def test_fetch_rejects_non_http(self) -> None:
-        with self.assertRaises(ValueError):
-            webfetch.fetch_url_text("ftp://example.com/x")
-
-
-class WatchTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.svc = RAGService(_settings(self.tmp.name))
-        self.watch_dir = os.path.join(self.tmp.name, "watched")
-        os.makedirs(self.watch_dir)
-        self.mgr = WatchManager(self.svc)
-
-    def tearDown(self) -> None:
-        self.tmp.cleanup()
-
-    def test_add_requires_directory(self) -> None:
-        with self.assertRaises(ValueError):
-            self.mgr.add(os.path.join(self.tmp.name, "nope"))
-
-    def test_sync_lifecycle(self) -> None:
-        path = os.path.join(self.watch_dir, "note.txt")
-        with open(path, "w") as f:
-            f.write(TEXT_A)
-        self.mgr.add(self.watch_dir)
-        first = self.mgr.sync_all()
-        self.assertEqual(len(first), 1)
-        self.assertEqual(first[0]["status"], "ready")
-        doc_id = first[0]["doc_id"]
-        self.assertEqual(self.svc.get_document(doc_id)["source"], "watch")
-
-        # Unchanged scan is a no-op.
-        self.assertEqual(self.mgr.sync_all(), [])
-
-        # Changed file re-ingests into the same doc id.
-        with open(path, "w") as f:
-            f.write(TEXT_B)
-        os.utime(path, (0, 0))
-        changed = self.mgr.sync_all()
-        self.assertEqual(len(changed), 1)
-        self.assertEqual(changed[0]["doc_id"], doc_id)
-        self.assertIn("Ferry", self.svc.get_document(doc_id)["text"])
-
-        # Removed file marks the doc missing; restored file clears it.
-        os.remove(path)
-        missing = self.mgr.sync_all()
-        self.assertEqual(missing[0]["status"], "missing")
-        self.assertEqual(self.svc.meta.get(doc_id)["status"], "missing")
-        with open(path, "w") as f:
-            f.write(TEXT_B)
-        self.mgr.sync_all()
-        self.assertNotEqual(self.svc.meta.get(doc_id)["status"], "missing")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""SQLite metadata store for documents, tags, and watched folders."""
+"""SQLite metadata store for documents and tags."""
 from __future__ import annotations
 
 import contextlib
@@ -78,33 +78,12 @@ class MetaStore:
             c.execute(
                 "CREATE INDEX IF NOT EXISTS idx_doc_tags_tag ON doc_tags(tag)"
             )
-            c.execute(
-                """CREATE TABLE IF NOT EXISTS watch_folders (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    path TEXT NOT NULL UNIQUE,
-                    recursive INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT NOT NULL
-                )"""
-            )
-            c.execute(
-                """CREATE TABLE IF NOT EXISTS watched_files (
-                    path TEXT PRIMARY KEY,
-                    mtime REAL NOT NULL DEFAULT 0,
-                    size INTEGER NOT NULL DEFAULT 0,
-                    content_hash TEXT NOT NULL DEFAULT '',
-                    doc_id TEXT NOT NULL DEFAULT ''
-                )"""
-            )
             self._migrate(c)
 
     def _migrate(self, c: sqlite3.Connection) -> None:
         cols = {r[1] for r in c.execute("PRAGMA table_info(documents)").fetchall()}
         if "content_hash" not in cols:
             c.execute("ALTER TABLE documents ADD COLUMN content_hash TEXT DEFAULT ''")
-        if "source" not in cols:
-            c.execute("ALTER TABLE documents ADD COLUMN source TEXT DEFAULT 'upload'")
-        if "source_uri" not in cols:
-            c.execute("ALTER TABLE documents ADD COLUMN source_uri TEXT DEFAULT ''")
         if "doc_type" not in cols:
             c.execute("ALTER TABLE documents ADD COLUMN doc_type TEXT DEFAULT 'document'")
         if "raw_path" not in cols:
@@ -117,19 +96,15 @@ class MetaStore:
             "CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(content_hash)"
         )
         c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(source)"
-        )
-        c.execute(
             "CREATE INDEX IF NOT EXISTS idx_documents_doc_type ON documents(doc_type)"
         )
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_documents_created ON documents(created_at)"
         )
-        wcols = {r[1] for r in c.execute("PRAGMA table_info(watch_folders)").fetchall()}
-        if "last_sync" not in wcols:
-            c.execute("ALTER TABLE watch_folders ADD COLUMN last_sync TEXT DEFAULT ''")
-        if "last_error" not in wcols:
-            c.execute("ALTER TABLE watch_folders ADD COLUMN last_error TEXT DEFAULT ''")
+        # Folder-watch support was removed: drop its state tables when an
+        # older database still carries them.
+        c.execute("DROP TABLE IF EXISTS watched_files")
+        c.execute("DROP TABLE IF EXISTS watch_folders")
 
     def _connect(self) -> sqlite3.Connection:
         c = sqlite3.connect(self.path, timeout=10.0)
@@ -155,8 +130,7 @@ class MetaStore:
     # -- documents ------------------------------------------------------
     def upsert(self, doc_id: str, filename: str, status: str,
                chunk_count: int = 0, error: str = "",
-               content_hash: str = "", source: str = "upload",
-               source_uri: str = "",
+               content_hash: str = "",
                doc_type: str = DOC_TYPE_DOCUMENT) -> None:
         now = datetime.now(timezone.utc).isoformat()
         doc_type = normalize_doc_type(doc_type)
@@ -164,20 +138,20 @@ class MetaStore:
             c.execute(
                 """INSERT INTO documents
                    (doc_id, filename, status, chunk_count, error, created_at,
-                    content_hash, source, source_uri, doc_type)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    content_hash, doc_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(doc_id) DO UPDATE SET
                      filename=excluded.filename, status=excluded.status,
                      chunk_count=excluded.chunk_count, error=excluded.error,
-                     content_hash=excluded.content_hash, source=excluded.source,
-                     source_uri=excluded.source_uri, doc_type=excluded.doc_type""",
+                     content_hash=excluded.content_hash,
+                     doc_type=excluded.doc_type""",
                 (doc_id, filename, status, chunk_count, error, now,
-                 content_hash, source, source_uri, doc_type),
+                 content_hash, doc_type),
             )
 
     def update_status(self, doc_id: str, status: str, error: str = "",
                       chunk_count: int | None = None) -> None:
-        """Status-only update: preserves hash/source/uri/type/filename.
+        """Status-only update: preserves hash/type/filename.
 
         Use for "processing" markers and failure records on docs that
         already carry provenance; a bare upsert() would wipe those fields
@@ -265,31 +239,13 @@ class MetaStore:
             return None
         return dict(row)
 
-    def get_by_source_uri(self, source_uri: str,
-                          status: str | None = None) -> dict | None:
-        """Most recent document ingested from this URI (URL retry reuse)."""
-        if not source_uri:
-            return None
-        with self._session() as c:
-            if status is None:
-                row = c.execute(
-                    """SELECT * FROM documents WHERE source_uri=?
-                       ORDER BY created_at DESC LIMIT 1""",
-                    (source_uri,)).fetchone()
-            else:
-                row = c.execute(
-                    """SELECT * FROM documents WHERE source_uri=? AND status=?
-                       ORDER BY created_at DESC LIMIT 1""",
-                    (source_uri, status)).fetchone()
-        return dict(row) if row else None
-
     _SORTS = {
         "newest": "created_at DESC, doc_id DESC",
         "oldest": "created_at ASC, doc_id ASC",
         "name": "filename COLLATE NOCASE ASC, doc_id ASC",
     }
 
-    def _filter_sql(self, doc_type: str | None, source: str | None,
+    def _filter_sql(self, doc_type: str | None,
                     query: str | None) -> tuple[str, list[str]]:
         dtype = normalize_doc_type(doc_type, allow_empty=True)
         clauses: list[str] = []
@@ -297,9 +253,6 @@ class MetaStore:
         if dtype is not None:
             clauses.append("doc_type=?")
             params.append(dtype)
-        if source:
-            clauses.append("source=?")
-            params.append(source.strip().lower())
         if query and query.strip():
             clauses.append("(filename LIKE ? ESCAPE '\\' OR doc_id=?)")
             params.extend([f"%{_escape_like(query.strip())}%", query.strip()])
@@ -307,13 +260,12 @@ class MetaStore:
         return where, params
 
     def list(self, doc_type: str | None = None,
-             source: str | None = None,
              query: str | None = None,
              limit: int | None = None, offset: int = 0,
              sort: str = "newest") -> list[dict]:
         order = self._SORTS.get((sort or "newest").strip().lower(),
                               self._SORTS["newest"])
-        where, params = self._filter_sql(doc_type, source, query)
+        where, params = self._filter_sql(doc_type, query)
         sql = f"SELECT * FROM documents {where} ORDER BY {order}".rstrip()
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"
@@ -330,9 +282,8 @@ class MetaStore:
         return docs
 
     def count_matching(self, doc_type: str | None = None,
-                       source: str | None = None,
                        query: str | None = None) -> int:
-        where, params = self._filter_sql(doc_type, source, query)
+        where, params = self._filter_sql(doc_type, query)
         with self._session() as c:
             row = c.execute(
                 f"SELECT COUNT(*) FROM documents {where}".rstrip(),
@@ -347,11 +298,11 @@ class MetaStore:
         """Cheap revision fingerprint for UI polling.
 
         One connection, two aggregate queries, no vector-store access:
-        external writers (MCP server, watch sync) change the library
-        through upsert/delete/tag writes, and every one of those moves
-        at least one field here (adds/updates bump ``latest`` via the
-        upsert timestamp, deletes move ``documents``, duplicate-ingest
-        tag merges move ``tags``).
+        external writers (the MCP server) change the library through
+        upsert/delete/tag writes, and every one of those moves at least
+        one field here (adds/updates bump ``latest`` via the upsert
+        timestamp, deletes move ``documents``, duplicate-ingest tag
+        merges move ``tags``).
         """
         with self._session() as c:
             row = c.execute(
@@ -373,24 +324,8 @@ class MetaStore:
     def delete(self, doc_id: str) -> bool:
         with self._session() as c:
             c.execute("DELETE FROM doc_tags WHERE doc_id=?", (doc_id,))
-            c.execute("DELETE FROM watched_files WHERE doc_id=?", (doc_id,))
             cur = c.execute("DELETE FROM documents WHERE doc_id=?", (doc_id,))
         return cur.rowcount > 0
-
-    def mark_missing(self, doc_id: str, missing: bool) -> None:
-        with self._session() as c:
-            if missing:
-                c.execute(
-                    "UPDATE documents SET status='missing', "
-                    "error='source file removed' WHERE doc_id=?",
-                    (doc_id,),
-                )
-            else:
-                c.execute(
-                    "UPDATE documents SET status='ready', error='' "
-                    "WHERE doc_id=? AND status='missing'",
-                    (doc_id,),
-                )
 
     # -- tags -----------------------------------------------------------
     def set_tags(self, doc_id: str, tags: list[str]) -> list[str]:
@@ -444,13 +379,6 @@ class MetaStore:
             ).fetchall()
         return [r[0] for r in rows]
 
-    def doc_ids_for_source(self, source: str) -> list[str]:
-        with self._session() as c:
-            rows = c.execute(
-                "SELECT doc_id FROM documents WHERE source=?", (source,)
-            ).fetchall()
-        return [r[0] for r in rows]
-
     def doc_ids_for_doc_type(self, doc_type: str) -> list[str]:
         dtype = normalize_doc_type(doc_type)
         with self._session() as c:
@@ -477,83 +405,3 @@ class MetaStore:
                 "SELECT doc_id FROM documents WHERE created_at >= ?",
                 (floor,)).fetchall()
         return [r[0] for r in rows]
-
-    # -- watched folders ------------------------------------------------
-    def add_watch(self, path: str, recursive: bool = True) -> dict:
-        now = datetime.now(timezone.utc).isoformat()
-        with self._session() as c:
-            try:
-                cur = c.execute(
-                    "INSERT INTO watch_folders (path, recursive, created_at) "
-                    "VALUES (?, ?, ?)",
-                    (path, 1 if recursive else 0, now),
-                )
-            except sqlite3.IntegrityError:
-                row = c.execute(
-                    "SELECT * FROM watch_folders WHERE path=?", (path,)
-                ).fetchone()
-                return dict(row)
-            row = c.execute(
-                "SELECT * FROM watch_folders WHERE id=?", (cur.lastrowid,)
-            ).fetchone()
-        return dict(row)
-
-    def list_watches(self) -> list[dict]:
-        with self._session() as c:
-            rows = c.execute(
-                "SELECT * FROM watch_folders ORDER BY created_at").fetchall()
-        return [dict(r) for r in rows]
-
-    def get_watch(self, watch_id: int) -> dict | None:
-        with self._session() as c:
-            row = c.execute(
-                "SELECT * FROM watch_folders WHERE id=?", (watch_id,)).fetchone()
-        return dict(row) if row else None
-
-    def remove_watch(self, watch_id: int) -> bool:
-        with self._session() as c:
-            cur = c.execute(
-                "DELETE FROM watch_folders WHERE id=?", (watch_id,))
-        return cur.rowcount > 0
-
-    def update_watch_status(self, watch_id: int, last_error: str = "") -> None:
-        now = datetime.now(timezone.utc).isoformat()
-        with self._session() as c:
-            c.execute(
-                "UPDATE watch_folders SET last_sync=?, last_error=? WHERE id=?",
-                (now, last_error, watch_id),
-            )
-
-    def get_watched_file(self, path: str) -> dict | None:
-        with self._session() as c:
-            row = c.execute(
-                "SELECT * FROM watched_files WHERE path=?", (path,)).fetchone()
-        return dict(row) if row else None
-
-    def set_watched_file(self, path: str, mtime: float, size: int,
-                         content_hash: str, doc_id: str) -> None:
-        with self._session() as c:
-            c.execute(
-                """INSERT INTO watched_files (path, mtime, size, content_hash, doc_id)
-                   VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(path) DO UPDATE SET
-                     mtime=excluded.mtime, size=excluded.size,
-                     content_hash=excluded.content_hash, doc_id=excluded.doc_id""",
-                (path, mtime, size, content_hash, doc_id),
-            )
-
-    def drop_watched_file(self, path: str) -> None:
-        with self._session() as c:
-            c.execute("DELETE FROM watched_files WHERE path=?", (path,))
-
-    def watched_files_for(self, prefix: str) -> list[dict]:
-        # Escape LIKE wildcards: '_' and '%' in folder names must match
-        # literally, or /a/my_docs would also match /a/my-docs/...
-        escaped = _escape_like(prefix.rstrip(os.sep))
-        with self._session() as c:
-            rows = c.execute(
-                "SELECT * FROM watched_files WHERE path=? "
-                "OR path LIKE ? ESCAPE '\\'",
-                (prefix, escaped + os.sep + "%"),
-            ).fetchall()
-        return [dict(r) for r in rows]

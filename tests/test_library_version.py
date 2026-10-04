@@ -18,6 +18,7 @@ from unittest import mock
 
 from app.config import Settings
 from app.service import RAGService
+from stub_embedder import StubEmbedder
 
 TEXT_A = (
     "Lighthouse maintenance log. The north beacon was relamped in March. "
@@ -32,7 +33,7 @@ TEXT_B = (
 def _svc(tmp: str) -> RAGService:
     s = Settings()
     s.data_dir = tmp
-    return RAGService(s)
+    return RAGService(s, embedder=StubEmbedder())
 
 
 class LibraryVersionTest(unittest.TestCase):
@@ -68,7 +69,7 @@ class LibraryVersionTest(unittest.TestCase):
                               ["session", "extra"], "memory")
         self.assertEqual(dup["status"], "duplicate")
         changed()
-        # MCP procure_add_url / second memory.
+        # Second memory.
         res_b = svc.ingest_text("memory: tides.md", TEXT_B, [], "memory")
         changed()
         # MCP procure_update_text (same doc, rewritten content).

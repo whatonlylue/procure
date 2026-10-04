@@ -15,6 +15,7 @@ from app.bench import datasets, metrics
 from app.bench.runner import BenchmarkRunner, ingest_corpus, remap_queries, run_benchmark
 from app.config import Settings
 from app.service import RAGService
+from stub_embedder import StubEmbedder
 
 
 def _settings(tmp: str) -> Settings:
@@ -24,7 +25,7 @@ def _settings(tmp: str) -> Settings:
 
 
 def _service(tmp: str) -> RAGService:
-    return RAGService(_settings(tmp))
+    return RAGService(_settings(tmp), embedder=StubEmbedder())
 
 
 class MetricsTest(unittest.TestCase):

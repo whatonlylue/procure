@@ -11,7 +11,11 @@ Windows/Linux nice-to-have. Researched Sep 2026 (tool states as of 2025–26).
 serve, ingest + search + full-doc fetch through the app, data persisted
 in `~/Library/Application Support/com.procure.app/`, clean quit with no
 orphaned sidecar (parent-watchdog in `app/cli.py` covers the onefile
-bootloader/payload split). v0.1 ships unsigned macOS (`.dmg`) + Windows
+bootloader/payload split). NOTE: since embeddings moved to ONNX Runtime
+granite (app/embeddings.py), the sidecar must now bundle `onnxruntime` +
+`tokenizers` + `huggingface_hub` (see procure-sidecar.spec) and the
+numbers above are stale — re-verify size and the first-run model download
+before the next release. v0.1 ships unsigned macOS (`.dmg`) + Windows
 (NSIS `.exe`) bundles, built by `.github/workflows/release.yml` on every
 `v*` tag push. Remaining before a public release: signing +
 notarization (needs a $99 Apple Developer ID), updater plugin, Intel +
@@ -68,8 +72,9 @@ subcommand for frozen re-invocation. Publish to PyPI + `install.sh` /
 `python:3.12-slim` + wheel), `VOLUME /data`, GHCR push via CI.
 
 **Step 3 — Tauri shell (~1 week, once users exist).** `cargo tauri init`
-against `frontend/`; PyInstaller onefile sidecar of `app/cli.py` (no
-torch); `externalBin` + spawn on start with `--port 0`, kill on exit;
+against `frontend/`; PyInstaller onefile sidecar of `app/cli.py`
+(onnxruntime bundled for embeddings; torch still excluded);
+`externalBin` + spawn on start with `--port 0`, kill on exit;
 GitHub Actions matrix (macOS arm64/Intel, Windows, Linux) → signed
 `.dmg`/`.msi`/`.AppImage` + updater endpoint.
 

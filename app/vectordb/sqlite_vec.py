@@ -78,8 +78,20 @@ class SqliteVectorStore:
             return None
         return len(np.frombuffer(blob[0], dtype=np.float32))
 
+    def stored_backend(self) -> str | None:
+        """Embedding backend tag of the stored corpus, if any was recorded.
+
+        Corpora written before backend tags existed (the hash era) report
+        None so callers treat them as stale instead of comparable.
+        """
+        with self._session() as c:
+            row = c.execute(
+                "SELECT value FROM store_meta WHERE key='backend'").fetchone()
+        return row[0] if row is not None else None
+
     def upsert(self, ids: list[str], doc_ids: list[str],
-               embeddings: list[list[float]], texts: list[str]) -> None:
+               embeddings: list[list[float]], texts: list[str],
+               backend: str | None = None) -> None:
         dims = {len(e) for e in embeddings}
         if len(dims) > 1:
             raise DimensionMismatchError(
@@ -102,6 +114,12 @@ class SqliteVectorStore:
                     "INSERT INTO store_meta (key, value) VALUES ('dim', ?) "
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     (str(next(iter(dims))),),
+                )
+            if backend is not None:
+                c.execute(
+                    "INSERT INTO store_meta (key, value) VALUES ('backend', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (backend,),
                 )
 
     def delete_by_doc(self, doc_id: str) -> int:

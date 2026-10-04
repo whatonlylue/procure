@@ -13,6 +13,7 @@ import unittest
 from app import mcp_server
 from app.config import Settings
 from app.service import RAGService
+from stub_embedder import StubEmbedder
 
 TEXT = (
     "Procure keeps field notes about lighthouse maintenance. "
@@ -29,7 +30,7 @@ def _settings(tmp: str) -> Settings:
 class DocumentFetchTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.svc = RAGService(_settings(self.tmp.name))
+        self.svc = RAGService(_settings(self.tmp.name), embedder=StubEmbedder())
         res = self.svc.ingest_text("lighthouse.md", TEXT)
         self.assertEqual(res["status"], "ready")
         self.doc_id = res["doc_id"]
@@ -66,7 +67,7 @@ class DocumentFetchTest(unittest.TestCase):
 class SettingsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.svc = RAGService(_settings(self.tmp.name))
+        self.svc = RAGService(_settings(self.tmp.name), embedder=StubEmbedder())
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -90,7 +91,7 @@ class SettingsTest(unittest.TestCase):
 class McpResourceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.svc = RAGService(_settings(self.tmp.name))
+        self.svc = RAGService(_settings(self.tmp.name), embedder=StubEmbedder())
         res = self.svc.ingest_text("memory: beacons", TEXT)
         self.doc_id = res["doc_id"]
         self._prev = mcp_server._service

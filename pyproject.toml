@@ -12,6 +12,9 @@ dependencies = [
   "pypdf>=4.0",
   "mcp>=2,<3",
   "platformdirs>=4",
+  "onnxruntime>=1.20",
+  "tokenizers>=0.19",
+  "huggingface_hub>=0.23",
 ]
 
 [project.optional-dependencies]

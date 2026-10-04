@@ -8,10 +8,12 @@ Build (from the project root, after `npm run build` in frontend/):
 Output: dist/procure-sidecar — copy to
 src-tauri/binaries/procure-sidecar-<target-triple> (see packaging script).
 
-The neural stack (torch, sentence-transformers, transformers) is
-deliberately excluded: the app runs fully offline on hash embeddings +
-BM25 + heuristic rerank, and every neural import in app/ degrades
-gracefully. This keeps the binary ~100MB instead of ~2GB.
+Embeddings run on ONNX Runtime (granite-embedding-small-english-r2,
+app/embeddings.py), so onnxruntime + tokenizers + huggingface_hub ship in
+the sidecar and the model (~100MB fp16) downloads once into the HF cache
+on first ingest. The torch rerank stack (torch, sentence-transformers,
+transformers) stays excluded: every neural import in app/ degrades
+gracefully, which keeps torch's ~2GB out of the binary.
 
 The benchmark harness (app.bench) is likewise excluded: it is source-only
 (still in git for `git clone` users, but not in wheels either), and
@@ -45,10 +47,7 @@ a = Analysis(
         "torch",
         "sentence_transformers",
         "transformers",
-        "huggingface_hub",
-        "tokenizers",
         "safetensors",
-        "onnxruntime",
         "sklearn",
         "scipy",
         "pandas",

@@ -12,15 +12,15 @@ import unittest
 import zipfile
 from unittest import mock
 
-from app import chunking, extract, mcp_server, skills, webfetch
+from app import chunking, extract, mcp_server, skills
 from app.config import Settings
 from app.jobs import JobManager
 from app.search import (clear_answerability, combine_answerability,
                         coverage_score, sigmoid)
 from app.service import RAGService
+from stub_embedder import StubEmbedder
 from app.store import MetaStore
 from app.vectordb.sqlite_vec import DimensionMismatchError, SqliteVectorStore
-from app.watch import WatchManager
 
 LONG_A = ("Beaconuesten maintenance log. The north beacon was relamped. " * 40)
 LONG_B = ("Harbor tide tables for April. Ferries follow the morning tide. " * 40)
@@ -34,8 +34,10 @@ def _settings(tmp: str, **kw) -> Settings:
     return s
 
 
-def _svc(tmp: str, **kw) -> RAGService:
-    return RAGService(_settings(tmp, **kw))
+def _svc(tmp: str, embedder=None, **kw) -> RAGService:
+    return RAGService(
+        _settings(tmp, **kw),
+        embedder=embedder if embedder is not None else StubEmbedder())
 
 
 class StaleChunksTest(unittest.TestCase):
@@ -65,18 +67,15 @@ class StaleChunksTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         svc = _svc(tmp.name)
-        path = os.path.join(tmp.name, "w.txt")
-        with open(path, "w") as f:
-            f.write(LONG_A)
-        res = svc.ingest_path(path, source="watch", source_uri=path)
+        res = svc.ingest_files([("w.txt", LONG_A.encode("utf-8"))])[0]
         doc_id = res["doc_id"]
         with mock.patch("app.extract.extract_text",
                         side_effect=RuntimeError("boom")):
-            out = svc.update_document_content(doc_id, b"new bytes")
+            out = svc.reingest_document(doc_id)
         self.assertEqual(out["status"], "failed")
         doc = svc.meta.get(doc_id)
-        self.assertEqual(doc["source"], "watch")
-        self.assertEqual(doc["source_uri"], path)
+        self.assertEqual(doc["filename"], "w.txt")
+        self.assertEqual(doc["doc_type"], "document")
         self.assertTrue(doc["content_hash"])
 
 
@@ -215,7 +214,9 @@ class VectorDimTest(unittest.TestCase):
         svc.ingest_text("a.md", LONG_A)
         status = svc.dimension_status()
         self.assertTrue(status["dense_ok"])
-        other = _svc(tmp.name, hash_dim=128)
+        # A different embedding backend over the same store must be
+        # reported, not silently served: dense is skipped, sparse answers.
+        other = _svc(tmp.name, embedder=StubEmbedder(backend="other-stub"))
         status = other.dimension_status()
         self.assertFalse(status["dense_ok"])
         self.assertIn("warning", status)
@@ -224,38 +225,32 @@ class VectorDimTest(unittest.TestCase):
         self.assertTrue(all(h["dense_score"] == 0.0 for h in hits))
         self.assertGreater(other.vectors.last_skipped, 0)
 
+    def test_legacy_untagged_corpus_is_reported_not_silent(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        svc = _svc(tmp.name)
+        svc.ingest_text("a.md", LONG_A)
+        # Simulate a pre-tag corpus (the hash era): vectors present, no
+        # backend tag. Same width must still NOT read as healthy.
+        with svc.vectors._session() as c:
+            c.execute("DELETE FROM store_meta WHERE key='backend'")
+        self.assertIsNone(svc.vectors.stored_backend())
+        status = svc.dimension_status()
+        self.assertFalse(status["dense_ok"])
+        self.assertIn("legacy", status["warning"])
+
 
 class StoreFixTest(unittest.TestCase):
     def test_update_status_preserves_provenance(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         meta = MetaStore(os.path.join(tmp.name, "m.sqlite"))
-        meta.upsert("d1", "f.md", "ready", 3, "", "abc",
-                    "watch", "/p/f", "document")
+        meta.upsert("d1", "f.md", "ready", 3, "", "abc")
         meta.update_status("d1", "processing")
         doc = meta.get("d1")
         self.assertEqual(doc["status"], "processing")
         self.assertEqual(doc["content_hash"], "abc")
-        self.assertEqual(doc["source"], "watch")
-        self.assertEqual(doc["source_uri"], "/p/f")
-
-    def test_delete_cascades_watched_rows(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        meta = MetaStore(os.path.join(tmp.name, "m.sqlite"))
-        meta.upsert("d1", "f.md", "ready", 1, "", "abc")
-        meta.set_watched_file("/w/f", 1.0, 2, "abc", "d1")
-        self.assertTrue(meta.delete("d1"))
-        self.assertEqual(meta.watched_files_for("/w"), [])
-
-    def test_like_prefix_is_literal(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        meta = MetaStore(os.path.join(tmp.name, "m.sqlite"))
-        meta.set_watched_file("/a/my-docs/f", 1.0, 1, "h1", "d1")
-        meta.set_watched_file("/a/my_docs/g", 1.0, 1, "h2", "d2")
-        rows = meta.watched_files_for("/a/my_docs")
-        self.assertEqual([r["path"] for r in rows], ["/a/my_docs/g"])
+        self.assertEqual(doc["filename"], "f.md")
 
     def test_list_filters_and_paging(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -276,116 +271,6 @@ class StoreFixTest(unittest.TestCase):
         meta = MetaStore(os.path.join(tmp.name, "m.sqlite"))
         with self.assertRaises(ValueError):
             meta.doc_ids_created_since("yesterday")
-
-
-class WatchFixTest(unittest.TestCase):
-    def _watched(self, tmp: str):
-        watch_dir = os.path.join(tmp, "watched")
-        os.makedirs(watch_dir)
-        return watch_dir
-
-    def test_failed_file_recorded_once(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        svc = _svc(tmp.name)
-        watch_dir = self._watched(tmp.name)
-        with open(os.path.join(watch_dir, "scan.pdf"), "wb") as f:
-            f.write(b"%PDF-not-really-a-pdf")
-        mgr = WatchManager(svc)
-        mgr.add(watch_dir)
-        first = mgr.sync_all()
-        self.assertEqual(len(first), 1)
-        self.assertEqual(first[0]["status"], "failed")
-        # Two more polls: no new failed docs, no crash, no results.
-        self.assertEqual(mgr.sync_all(), [])
-        self.assertEqual(mgr.sync_all(), [])
-        self.assertEqual(len(svc.list_documents()), 1)
-
-    def test_deleted_doc_recovers_without_crash(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        svc = _svc(tmp.name)
-        watch_dir = self._watched(tmp.name)
-        path = os.path.join(watch_dir, "note.txt")
-        with open(path, "w") as f:
-            f.write(LONG_A)
-        mgr = WatchManager(svc)
-        mgr.add(watch_dir)
-        doc_id = mgr.sync_all()[0]["doc_id"]
-        self.assertTrue(svc.delete_document(doc_id))
-        with open(path, "w") as f:
-            f.write(LONG_B)
-        os.utime(path, (0, 0))
-        res = mgr.sync_all()
-        self.assertEqual(len(res), 1)
-        self.assertEqual(res[0]["status"], "ready")
-        self.assertNotEqual(res[0]["doc_id"], doc_id)
-
-    def test_linked_duplicate_never_overwritten(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        svc = _svc(tmp.name)
-        upload = svc.ingest_text("orig.md", LONG_A)
-        watch_dir = self._watched(tmp.name)
-        path = os.path.join(watch_dir, "copy.txt")
-        with open(path, "w") as f:
-            f.write(LONG_A)
-        mgr = WatchManager(svc)
-        mgr.add(watch_dir)
-        first = mgr.sync_all()
-        self.assertEqual(first[0]["status"], "duplicate")
-        with open(path, "w") as f:
-            f.write(LONG_B)
-        os.utime(path, (0, 0))
-        second = mgr.sync_all()
-        self.assertEqual(second[0]["status"], "ready")
-        # The upload still has its original content.
-        self.assertIn("relamped", svc.get_document(upload["doc_id"])["text"])
-        self.assertNotIn("Ferry", svc.get_document(upload["doc_id"])["text"])
-
-
-class WebfetchFixTest(unittest.TestCase):
-    def test_block_pattern_ignores_lookalikes(self) -> None:
-        page = ('<html><head><link href="/s.css">head junk here</link></head>'
-                '<body><picture><source src="x"></picture>'
-                '<p>This paragraph is long enough to survive cleaning.</p>'
-                '</body></html>')
-        out = webfetch._fallback_blocks(page)
-        self.assertNotIn("junk", out)
-        self.assertIn("long enough", out)
-
-    def test_private_urls_refused(self) -> None:
-        with self.assertRaises(ValueError):
-            webfetch.fetch_url_text("http://127.0.0.1:9/x")
-
-    def test_unknown_charset_falls_back(self) -> None:
-        body = (b"<html><head><title>T</title></head><body>"
-                b"<p>This paragraph is long enough to survive cleaning.</p>"
-                b"</body></html>")
-
-        class FakeResp:
-            headers = {"Content-Type": "text/html; charset=bogus-xyz"}
-
-            def __init__(self, payload: bytes):
-                self._payload = payload
-
-            def read(self, _n: int) -> bytes:
-                return self._payload
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-
-        import os
-        import urllib.request
-        with (mock.patch.dict(os.environ, {"PROCURE_FETCH_ALLOW_PRIVATE": "1"}),
-              mock.patch.object(urllib.request, "urlopen",
-                                return_value=FakeResp(body))):
-            title, text = webfetch.fetch_url_text("https://example.com/p")
-        self.assertEqual(title, "T")
-        self.assertIn("long enough", text)
 
 
 class JobsPruneTest(unittest.TestCase):
@@ -574,6 +459,8 @@ class CliTest(unittest.TestCase):
         self.assertTrue(__version__)
 
     def test_add_list_search(self) -> None:
+        from unittest import mock
+
         from app import cli
 
         tmp = tempfile.TemporaryDirectory()
@@ -581,13 +468,17 @@ class CliTest(unittest.TestCase):
         path = os.path.join(tmp.name, "note.txt")
         with open(path, "w") as f:
             f.write(LONG_A)
-        self.assertEqual(
-            cli.main(["add", path, "--data-dir",
-                      os.path.join(tmp.name, "data")]), 0)
-        data = os.path.join(tmp.name, "data")
-        self.assertEqual(cli.main(["list", "--data-dir", data]), 0)
-        self.assertEqual(
-            cli.main(["search", "relamped", "--data-dir", data]), 0)
+        # The CLI builds its own RAGService; keep this hermetic (no model
+        # download) by substituting the deterministic test embedder.
+        with mock.patch("app.service.GraniteEmbedder",
+                        lambda *a, **k: StubEmbedder()):
+            self.assertEqual(
+                cli.main(["add", path, "--data-dir",
+                          os.path.join(tmp.name, "data")]), 0)
+            data = os.path.join(tmp.name, "data")
+            self.assertEqual(cli.main(["list", "--data-dir", data]), 0)
+            self.assertEqual(
+                cli.main(["search", "relamped", "--data-dir", data]), 0)
 
 
 class SettingsPersistTest(unittest.TestCase):

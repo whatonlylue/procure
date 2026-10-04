@@ -12,6 +12,7 @@ import unittest
 from app import mcp_server
 from app.config import Settings
 from app.service import RAGService
+from stub_embedder import StubEmbedder
 from app.store import normalize_doc_type
 
 MEM_TEXT = (
@@ -54,7 +55,7 @@ class DocTypeNormalizeTest(unittest.TestCase):
 class MemoryServiceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.svc = RAGService(_settings(self.tmp.name))
+        self.svc = RAGService(_settings(self.tmp.name), embedder=StubEmbedder())
         mem = self.svc.ingest_text("memory: beacons", MEM_TEXT,
                                    ["project-x"], doc_type="memory")
         self.assertEqual(mem["status"], "ready")
@@ -118,25 +119,10 @@ class MemoryServiceTest(unittest.TestCase):
         doc = self.svc.get_document(self.mem_id)
         self.assertEqual(doc["text"], MEM_TEXT)
 
-    def test_ingest_url_accepts_type(self) -> None:
-        from unittest import mock
-
-        from app import webfetch
-        with mock.patch.object(
-            webfetch, "fetch_url_text",
-            return_value=("Gull News",
-                          "Harbor gulls nest on the east pier. " * 20),
-        ):
-            res = self.svc.ingest_url("https://example.com/m",
-                                      doc_type="memory")
-        self.assertEqual(res["status"], "ready")
-        self.assertEqual(res["doc_type"], "memory")
-
-
 class MemoryMcpTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.svc = RAGService(_settings(self.tmp.name))
+        self.svc = RAGService(_settings(self.tmp.name), embedder=StubEmbedder())
         res = self.svc.ingest_text("memory: beacons", MEM_TEXT,
                                    doc_type="memory")
         self.mem_id = res["doc_id"]

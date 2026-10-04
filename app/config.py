@@ -1,4 +1,4 @@
-"""Central settings. Local-only: hash embeddings + sqlite store, tuned via env flags."""
+"""Central settings. Local-only: granite ONNX embeddings + sqlite store, tuned via env flags."""
 from __future__ import annotations
 
 import json
@@ -29,8 +29,24 @@ class Settings:
     (see RAGService.update_settings); env flags still set the startup values."""
 
     data_dir: str = field(default_factory=_default_data_dir)
-    # Width of the local hash embedding vectors.
-    hash_dim: int = field(default_factory=lambda: int(_env("PROCURE_HASH_DIM", "384")))
+    # Granite R2 embedding backend (ONNX Runtime; GPU when available).
+    # See app/embeddings.py for the full flag list.
+    embedding_model: str = field(default_factory=lambda: _env(
+        "PROCURE_EMBEDDING_MODEL",
+        "onnx-community/granite-embedding-small-english-r2-ONNX"))
+    embedding_file: str = field(default_factory=lambda: _env(
+        "PROCURE_EMBEDDING_FILE", "onnx/model_fp16.onnx"))
+    # Local checkout of the model repo (offline use); "" downloads once
+    # into the Hugging Face cache.
+    embedding_dir: str = field(default_factory=lambda: _env(
+        "PROCURE_EMBEDDING_DIR", ""))
+    # Comma-separated provider override (e.g. "cuda" or "cpu"); "" = auto.
+    embedding_providers: str = field(default_factory=lambda: _env(
+        "PROCURE_EMBEDDING_PROVIDERS", ""))
+    embedding_batch: int = field(default_factory=lambda: int(_env(
+        "PROCURE_EMBEDDING_BATCH", "32")))
+    embedding_max_length: int = field(default_factory=lambda: int(_env(
+        "PROCURE_EMBEDDING_MAX_LENGTH", "2048")))
     chunk_size: int = field(default_factory=lambda: int(_env("PROCURE_CHUNK_SIZE", "1000")))
     chunk_overlap: int = field(default_factory=lambda: int(_env("PROCURE_CHUNK_OVERLAP", "150")))
     # Search: "hybrid" (BM25 + dense with RRF fusion) | "dense" (cosine only)
@@ -55,21 +71,10 @@ class Settings:
     # MCP server (Streamable HTTP) bind address. Served at http://host:port/mcp.
     mcp_host: str = field(default_factory=lambda: _env("PROCURE_MCP_HOST", "127.0.0.1"))
     mcp_port: int = field(default_factory=lambda: int(_env("PROCURE_MCP_PORT", "8001")))
-    # Folder-watch poll interval in seconds (0 disables the background loop;
-    # manual "sync now" still works).
-    watch_interval: int = field(
-        default_factory=lambda: int(_env("PROCURE_WATCH_INTERVAL", "60")))
     # OCR: "auto" (thin/scanned pages only) | "on" (force OCR on every PDF
     # page; images are always OCRed) | "off" (never OCR; scanned files fail
     # with guidance). Needs the [ocr] extra either way.
     ocr_mode: str = field(default_factory=lambda: _env("PROCURE_OCR", "auto").lower())
-    # URL fetch timeout in seconds.
-    fetch_timeout: float = field(
-        default_factory=lambda: float(_env("PROCURE_FETCH_TIMEOUT", "20")))
-    # Reject URL fetches that resolve to loopback/link-local/private IPs
-    # (SSRF guard for the MCP fetch tool). Set 1 to allow (tests, intranets).
-    fetch_allow_private: bool = field(default_factory=lambda: _truthy(_env(
-        "PROCURE_FETCH_ALLOW_PRIVATE", "0")))
     # Per-file upload cap in megabytes (413 beyond it).
     max_upload_mb: int = field(
         default_factory=lambda: int(_env("PROCURE_MAX_UPLOAD_MB", "100")))
