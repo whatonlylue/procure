@@ -8,7 +8,7 @@ Build (from the project root, after `npm run build` in frontend/):
 Output: dist/procure-sidecar — copy to
 src-tauri/binaries/procure-sidecar-<target-triple> (see packaging script).
 
-The neural stack (torch, sentence-transformers, transformers, chromadb) is
+The neural stack (torch, sentence-transformers, transformers) is
 deliberately excluded: the app runs fully offline on hash embeddings +
 BM25 + heuristic rerank, and every neural import in app/ degrades
 gracefully. This keeps the binary ~100MB instead of ~2GB.
@@ -48,7 +48,6 @@ a = Analysis(
         "huggingface_hub",
         "tokenizers",
         "safetensors",
-        "chromadb",
         "onnxruntime",
         "sklearn",
         "scipy",

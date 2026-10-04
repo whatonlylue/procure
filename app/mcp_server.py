@@ -6,7 +6,7 @@ Managed from the workspace UI (MCP Server tab), or standalone:
 
 Clients register the URL printed at startup (http://host:port/mcp).
 Reads PROCURE_* env the same way as the main app so both processes share
-one data dir, embedding backend, and vector store.
+one data dir and library.
 """
 from __future__ import annotations
 
@@ -115,8 +115,7 @@ def _svc() -> RAGService:
             if _service is None:
                 _service = RAGService()
                 logger.info(
-                    "RAG service ready: embeddings=%s vectordb=%s chunks=%d documents=%d",
-                    _service.settings.embeddings, _service.settings.vectordb,
+                    "RAG service ready: chunks=%d documents=%d",
                     _service.vectors.count(), _service.meta.count(),
                 )
     return _service

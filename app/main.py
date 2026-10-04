@@ -154,8 +154,6 @@ def health() -> dict:
     return {
         "status": "ok",
         "version": __version__,
-        "embeddings": svc.settings.embeddings,
-        "vectordb": svc.settings.vectordb,
         "embed_dim": svc.embedder.dim,
         "chunks": svc.vectors.count(),
         "documents": svc.meta.count(),

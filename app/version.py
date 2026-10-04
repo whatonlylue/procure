@@ -7,4 +7,4 @@ manifests. Runtime code (``/api/health``, the fetch user agent,
 ``--version``) imports from here so it can never drift.
 """
 
-__version__ = "0.2.3"
+__version__ = "0.2.4"

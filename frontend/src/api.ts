@@ -63,8 +63,6 @@ export interface DenseStatus {
 export interface Health {
   status: string;
   version: string;
-  embeddings: string;
-  vectordb: string;
   embed_dim: number;
   chunks: number;
   documents: number;

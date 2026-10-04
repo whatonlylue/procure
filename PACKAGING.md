@@ -28,9 +28,10 @@ Linux builds, final icon (current one is a placeholder).
   user-writable location outside the bundle (`platformdirs.user_data_dir`,
   e.g. `~/Library/Application Support/procure`) or upgrades wipe user data.
   Mandatory before any packaged release.
-- Heavy optionals (`sentence-transformers` → torch ~2GB, `chromadb`) must
-  stay opt-in; never in the base artifact. The cached-only model-download
-  defaults are already exactly right for distribution.
+- Heavy optionals (`sentence-transformers` → torch ~2GB, for the optional
+  neural reranker) must stay opt-in; never in the base artifact. The
+  cached-only model-download defaults are already exactly right for
+  distribution.
 
 ## Options compared
 

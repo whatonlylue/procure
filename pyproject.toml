@@ -1,6 +1,6 @@
 [project]
 name = "procure"
-version = "0.2.3"
+version = "0.2.4"
 description = "Local-first RAG: drag-drop ingest, chunk+embed+store, semantic search."
 license = { text = "MIT" }
 requires-python = ">=3.11"
@@ -15,8 +15,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-sbert = ["sentence-transformers>=3.0"]
-chroma = ["chromadb>=0.5"]
 ocr = ["rapidocr-onnxruntime>=1.0", "pymupdf>=1.24", "pillow>=10"]
 web = ["trafilatura>=1.0"]
 readability = ["readability-lxml>=0.8"]
@@ -26,7 +24,7 @@ readability = ["readability-lxml>=0.8"]
 # the default mteb pull path and the rest of the harness are stdlib-only).
 bench = ["pyarrow>=12"]
 dev = ["pyinstaller>=6"]
-all = ["sentence-transformers>=3.0", "chromadb>=0.5", "rapidocr-onnxruntime>=1.0", "pymupdf>=1.24", "pillow>=10", "trafilatura>=1.0", "readability-lxml>=0.8", "pyarrow>=12"]
+all = ["rapidocr-onnxruntime>=1.0", "pymupdf>=1.24", "pillow>=10", "trafilatura>=1.0", "readability-lxml>=0.8", "pyarrow>=12"]
 
 [project.scripts]
 procure = "app.cli:main"

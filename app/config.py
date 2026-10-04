@@ -1,4 +1,4 @@
-"""Central settings. Local-first defaults; cloud via env flags only."""
+"""Central settings. Local-only: hash embeddings + sqlite store, tuned via env flags."""
 from __future__ import annotations
 
 import json
@@ -29,15 +29,8 @@ class Settings:
     (see RAGService.update_settings); env flags still set the startup values."""
 
     data_dir: str = field(default_factory=_default_data_dir)
-    # Embeddings backend: "hash" (local default, zero deps) | "sbert" (local neural) | "openai" (cloud)
-    embeddings: str = field(default_factory=lambda: _env("PROCURE_EMBEDDINGS", "hash").lower())
-    # Vector store: "sqlite" (local default) | "chroma" (local persistent, needs extra)
-    vectordb: str = field(default_factory=lambda: _env("PROCURE_VECTORDB", "sqlite").lower())
-    local_model: str = field(default_factory=lambda: _env("PROCURE_LOCAL_MODEL", "all-MiniLM-L6-v2"))
+    # Width of the local hash embedding vectors.
     hash_dim: int = field(default_factory=lambda: int(_env("PROCURE_HASH_DIM", "384")))
-    openai_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY", ""))
-    openai_model: str = field(default_factory=lambda: _env("OPENAI_EMBED_MODEL", "text-embedding-3-small"))
-    openai_base: str = field(default_factory=lambda: _env("OPENAI_BASE_URL", "https://api.openai.com/v1"))
     chunk_size: int = field(default_factory=lambda: int(_env("PROCURE_CHUNK_SIZE", "1000")))
     chunk_overlap: int = field(default_factory=lambda: int(_env("PROCURE_CHUNK_OVERLAP", "150")))
     # Search: "hybrid" (BM25 + dense with RRF fusion) | "dense" (cosine only)
@@ -143,10 +136,6 @@ class Settings:
     @property
     def vec_db(self) -> str:
         return os.path.join(self.data_dir, "vectordb.sqlite")
-
-    @property
-    def chroma_dir(self) -> str:
-        return os.path.join(self.data_dir, "chroma")
 
     @property
     def sparse_db(self) -> str:

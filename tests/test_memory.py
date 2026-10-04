@@ -27,7 +27,6 @@ DOC_TEXT = (
 def _settings(tmp: str) -> Settings:
     s = Settings()
     s.data_dir = tmp
-    s.embeddings = "hash"
     return s
 
 

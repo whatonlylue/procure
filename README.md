@@ -17,16 +17,16 @@
 - **Library tab** — per-document status (`ready`/`failed`/`missing`), chunk counts, tags, delete, re-ingest.
 - **MCP server tab** — one click starts a Streamable-HTTP Model Context Protocol server exposing `procure_search` (tag + type + source + recency scope), `procure_add_text`, `procure_add_url`, `procure_update_text`, `procure_delete_document`, `procure_list_documents` (paged + filtered), plus `procure://documents/{id}` full-text resources — any agent harness can search, read, write, revise, and delete in the library.
 - **Cross-agent memories** — documents typed `memory` are shared across agent sessions and harnesses: agents save with `procure_add_text(..., doc_type="memory")` and recall with `procure_search(..., doc_type="memory")` whenever the user references previous work.
-- **Pluggable backends** — embeddings: `hash` (zero-dep) / `sbert` (local neural, recommended) / `openai`; vector stores: `sqlite` / `chroma`. All via env flags.
+- **Local-only pipeline** — zero-dependency hashed word n-gram embeddings plus a SQLite vector store; no accounts, no cloud, no backend switching.
 
-On a 10-book / 10-query eval, hybrid + CLEAR rerank reaches **9/10 top-1 (MRR 0.950)** with `sbert`, vs 6/10 dense-only.
+On a 10-book / 10-query eval, hybrid + CLEAR rerank reaches **9/10 top-1 (MRR 0.950)**, vs 6/10 dense-only.
 
 ## Run from source
 
 ```sh
-uv pip install -e '.[sbert]'   # or -e . for zero-dep defaults
+uv pip install -e .
 cd frontend && npm install && npm run build && cd ..
-PROCURE_EMBEDDINGS=sbert uv run uvicorn app.main:app --port 8000
+uv run uvicorn app.main:app --port 8000
 # open http://127.0.0.1:8000
 ```
 
@@ -52,8 +52,7 @@ Claude Code users can instead install the bundled plugin (`/plugin marketplace a
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PROCURE_EMBEDDINGS` | `hash` | `hash` · `sbert` (recommended) · `openai` |
-| `PROCURE_VECTORDB` | `sqlite` | `sqlite` · `chroma` |
+| `PROCURE_HASH_DIM` | `384` | hash embedding width (changing it orphans old vectors; re-ingest) |
 | `PROCURE_SEARCH` / `PROCURE_RERANK` | `hybrid` / `on` | retrieval mode · answerability rerank |
 | `PROCURE_TOPK` | `5` | default hits per query |
 | `PROCURE_CROSS_ENCODER_ALLOW_DOWNLOAD` / `PROCURE_NLI_ALLOW_DOWNLOAD` | `0` | set `1` once to fetch neural models, then stays offline |
