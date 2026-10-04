@@ -367,16 +367,27 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+# Printed when `procure bench` runs from a build that excluded the
+# source-only benchmark harness (wheels/sidecars never ship app.bench).
+_BENCH_MISSING = ("error: benchmark support is not included in this install "
+                  "(it is source-only); git clone the procure repo to use "
+                  "`procure bench`")
+
+
 def cmd_bench(args: argparse.Namespace) -> int:
     import json
     import tempfile
 
-    from app.bench.datasets import (
-        load_beir_dir,
-        load_corpus_jsonl,
-        load_queries_jsonl,
-        write_sample_dataset,
-    )
+    try:
+        from app.bench.datasets import (
+            load_beir_dir,
+            load_corpus_jsonl,
+            load_queries_jsonl,
+            write_sample_dataset,
+        )
+    except ImportError:
+        print(_BENCH_MISSING)
+        return 1
 
     if args.action == "init":
         paths = write_sample_dataset(args.init_dir)
@@ -384,7 +395,11 @@ def cmd_bench(args: argparse.Namespace) -> int:
         return 0
 
     if args.action == "list":
-        from app.bench.sources import list_datasets
+        try:
+            from app.bench.sources import list_datasets
+        except ImportError:
+            print(_BENCH_MISSING)
+            return 1
 
         rows = list_datasets()
         width = max(len(r["dataset"]) for r in rows)
@@ -394,7 +409,11 @@ def cmd_bench(args: argparse.Namespace) -> int:
         return 0
 
     if args.action == "pull":
-        from app.bench.sources import pull
+        try:
+            from app.bench.sources import pull
+        except ImportError:
+            print(_BENCH_MISSING)
+            return 1
 
         if not args.dataset:
             print("error: bench pull needs --dataset (see bench list)")
@@ -429,7 +448,11 @@ def cmd_bench(args: argparse.Namespace) -> int:
         print(f"error: {e}")
         return 1
 
-    from app.bench.runner import run_benchmark
+    try:
+        from app.bench.runner import run_benchmark
+    except ImportError:
+        print(_BENCH_MISSING)
+        return 1
     from app.config import get_settings
     from app.service import RAGService
 

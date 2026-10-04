@@ -8,6 +8,9 @@ __pycache__/
 *.pyc
 *.egg-info/
 .DS_Store
+.serena/
+.claude-plugin/
+.mcp.json
 # Desktop build outputs (rebuilt by scripts/build_desktop.sh)
 /dist/
 /build/

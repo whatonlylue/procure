@@ -12,6 +12,10 @@ The neural stack (torch, sentence-transformers, transformers, chromadb) is
 deliberately excluded: the app runs fully offline on hash embeddings +
 BM25 + heuristic rerank, and every neural import in app/ degrades
 gracefully. This keeps the binary ~100MB instead of ~2GB.
+
+The benchmark harness (app.bench) is likewise excluded: it is source-only
+(still in git for `git clone` users, but not in wheels either), and
+`procure bench` in app/cli.py degrades to a clear error without it.
 """
 
 a = Analysis(
@@ -33,6 +37,11 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
+        "app.bench",
+        "app.bench.datasets",
+        "app.bench.metrics",
+        "app.bench.runner",
+        "app.bench.sources",
         "torch",
         "sentence_transformers",
         "transformers",
