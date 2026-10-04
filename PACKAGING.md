@@ -4,8 +4,8 @@ Goal: a download-and-run procure for non-expert users, macOS first,
 Windows/Linux nice-to-have. Researched Sep 2026 (tool states as of 2025–26).
 
 **Status: Tauri shell built and verified locally (Apple Silicon).**
-`src-tauri/target/release/bundle/macos/procure.app` (40MB) and
-`.../bundle/dmg/procure_0.1.0_aarch64.dmg` (32.6MB) are produced by
+`src-tauri/target/release/bundle/macos/Procure.app` (40MB) and
+`.../bundle/dmg/Procure_0.1.0_aarch64.dmg` (32.6MB) are produced by
 `./scripts/build_desktop.sh` (frontend → PyInstaller onefile sidecar,
 29MB, torch excluded → Tauri bundle). Verified: launch, ephemeral-port
 serve, ingest + search + full-doc fetch through the app, data persisted

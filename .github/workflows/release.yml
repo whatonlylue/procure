@@ -55,8 +55,8 @@ jobs:
         run: |
           TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           mkdir -p src-tauri/binaries
-          touch "src-tauri/binaries/procure-sidecar-${TRIPLE}"
-          chmod +x "src-tauri/binaries/procure-sidecar-${TRIPLE}"
+          touch "src-tauri/binaries/ProcureHelper-${TRIPLE}"
+          chmod +x "src-tauri/binaries/ProcureHelper-${TRIPLE}"
 
       - name: Desktop shell tests
         run: |
@@ -104,7 +104,7 @@ jobs:
         run: |
           TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           mkdir -p src-tauri/binaries
-          cp dist/procure-sidecar "src-tauri/binaries/procure-sidecar-${TRIPLE}"
+          cp dist/ProcureHelper "src-tauri/binaries/ProcureHelper-${TRIPLE}"
 
       - name: Stage sidecar for Tauri (Windows)
         if: runner.os == 'Windows'
@@ -112,7 +112,7 @@ jobs:
         run: |
           $triple = ((rustc -vV | Select-String '^host: ') -replace 'host: ','').Trim()
           New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
-          Copy-Item dist/procure-sidecar.exe "src-tauri/binaries/procure-sidecar-$triple.exe"
+          Copy-Item dist/ProcureHelper.exe "src-tauri/binaries/ProcureHelper-$triple.exe"
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked

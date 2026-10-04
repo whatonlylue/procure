@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "procure",
+  "productName": "Procure",
   "version": "0.2.4",
   "identifier": "com.procure.app",
   "build": {
@@ -25,6 +25,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/procure-sidecar"]
+    "externalBin": ["binaries/ProcureHelper"]
   }
 }

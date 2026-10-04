@@ -5,8 +5,16 @@ Build (from the project root, after `npm run build` in frontend/):
 
     .venv/bin/pyinstaller procure-sidecar.spec
 
-Output: dist/procure-sidecar — copy to
-src-tauri/binaries/procure-sidecar-<target-triple> (see packaging script).
+Output: dist/ProcureHelper — copy to
+src-tauri/binaries/ProcureHelper-<target-triple> (see packaging script).
+
+The output name is the user-visible process name: Activity Monitor /
+Task Manager show the sidecar (bootloader + payload child, plus two
+more when the MCP server re-invokes this same binary) as ProcureHelper
+alongside the Procure app shell, so compute-heavy Python work is
+attributable at a glance. The MCP server is not an independent binary
+(it re-invokes this one via the `mcp-server` subcommand), so it
+deliberately shares the ProcureHelper name rather than getting its own.
 
 Embeddings run on ONNX Runtime (granite-embedding-small-english-r2,
 app/embeddings.py), so onnxruntime + tokenizers + huggingface_hub ship in
@@ -71,7 +79,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="procure-sidecar",
+    name="ProcureHelper",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

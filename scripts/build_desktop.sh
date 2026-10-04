@@ -4,7 +4,7 @@
 # installed, and the Rust toolchain + tauri-cli.
 #
 # Outputs (per OS):
-#   macOS:   src-tauri/target/release/bundle/macos/procure.app (+ .dmg)
+#   macOS:   src-tauri/target/release/bundle/macos/Procure.app (+ .dmg)
 #   Windows: src-tauri/target/release/bundle/nsis/procure-*-setup.exe
 #   Linux:   src-tauri/target/release/bundle/appimage/*.AppImage
 set -euo pipefail
@@ -37,7 +37,7 @@ echo "==> sidecar"
 echo "==> stage sidecar for Tauri"
 TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 mkdir -p src-tauri/binaries
-cp "dist/procure-sidecar${EXE}" "src-tauri/binaries/procure-sidecar-${TRIPLE}${EXE}"
+cp "dist/ProcureHelper${EXE}" "src-tauri/binaries/ProcureHelper-${TRIPLE}${EXE}"
 
 echo "==> Tauri bundle"
 cargo tauri build --bundles "$BUNDLES"
