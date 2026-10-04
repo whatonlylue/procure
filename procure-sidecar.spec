@@ -12,9 +12,11 @@ The neural stack (torch, sentence-transformers, transformers, chromadb) is
 deliberately excluded: the app runs fully offline on hash embeddings +
 BM25 + heuristic rerank, and every neural import in app/ degrades
 gracefully. This keeps the binary ~100MB instead of ~2GB.
-"""
 
-block_cipher = None
+The benchmark harness (app.bench) is likewise excluded: it is source-only
+(still in git for `git clone` users, but not in wheels either), and
+`procure bench` in app/cli.py degrades to a clear error without it.
+"""
 
 a = Analysis(
     ["app/cli.py"],
@@ -35,6 +37,11 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
+        "app.bench",
+        "app.bench.datasets",
+        "app.bench.metrics",
+        "app.bench.runner",
+        "app.bench.sources",
         "torch",
         "sentence_transformers",
         "transformers",
@@ -54,13 +61,10 @@ a = Analysis(
         "IPython",
         "jupyter",
     ],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data)
 
 exe = EXE(
     pyz,

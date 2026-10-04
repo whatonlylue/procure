@@ -12,7 +12,59 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Tauri shells out to pkg-config for system glib/GTK via tao ->
+      # glib-sys on Linux; without these dev packages the glib-sys build
+      # script fails and `cargo test` never compiles.
+      - name: Install Tauri Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Backend tests
+        run: |
+          pip install .
+          python -m unittest discover -s tests
+
+      - name: Lint (ruff)
+        run: |
+          pip install ruff
+          ruff check app tests
+
+      - name: Frontend typecheck + build
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Stage dummy sidecar for cargo test
+        run: |
+          TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p src-tauri/binaries
+          touch "src-tauri/binaries/procure-sidecar-${TRIPLE}"
+          chmod +x "src-tauri/binaries/procure-sidecar-${TRIPLE}"
+
+      - name: Desktop shell tests
+        run: |
+          cd src-tauri
+          cargo test
+
   build:
+    needs: test
     strategy:
       fail-fast: false
       matrix:
@@ -23,13 +75,13 @@ jobs:
             bundles: nsis
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -69,7 +121,7 @@ jobs:
         run: cargo tauri build --bundles ${{ matrix.bundles }}
 
       - name: Upload bundle artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bundle-${{ runner.os }}
           path: |
@@ -81,13 +133,13 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: bundles
           merge-multiple: true
 
       - name: Attach bundles to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           # Artifacts preserve their bundle subdir (bundles/dmg/..., bundles/nsis/...),
           # so match recursively. fail_on_unmatched_files keeps a future

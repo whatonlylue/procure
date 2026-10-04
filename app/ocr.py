@@ -1,19 +1,10 @@
 """Optional OCR for scanned PDFs and image files.
 
 No hard dependencies: backends are probed lazily and the caller degrades
-gracefully when none is installed.
-
-Backend preference (researched 2025-2026 landscape):
-
-- ``rapidocr`` (``rapidocr_onnxruntime``, PaddleOCR-family) is preferred:
-  pip-only wheels, no system binary, generally better accuracy than
-  Tesseract on noisy scans.
-- ``tesseract`` (``pytesseract`` + a system ``tesseract`` binary) is the
-  fallback classic.
-
-PDF page rendering needs ``pymupdf`` (pip wheel, no system deps).
-Install with: ``uv pip install -e '.[ocr]'`` (+ a tesseract binary only
-for the fallback path).
+gracefully when none is installed. ``rapidocr`` (pip-only wheels, no
+system binary) is preferred; ``tesseract`` (binary + ``pytesseract``) is
+the fallback. PDF page rendering needs ``pymupdf``.
+Install with: ``uv pip install -e '.[ocr]'``.
 """
 from __future__ import annotations
 

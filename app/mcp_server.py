@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import threading
 from typing import Annotated
 
 from mcp.server import MCPServer
@@ -42,8 +43,10 @@ mcp = MCPServer(
     instructions=(
         "procure stores ingested documents as embedded chunks. Use procure_search "
         "to answer questions from the library, procure_list_documents to see what "
-        "is stored, and procure_add_text to persist new material (conversation "
-        "transcripts, tool outputs, notes) for future retrieval. Pass "
+        "is stored, procure_add_text to persist new material (conversation "
+        "transcripts, tool outputs, notes) for future retrieval, "
+        "procure_update_text to revise a stored text, and "
+        "procure_delete_document to remove one. Pass "
         'doc_type="memory" to save or search cross-agent memories; omit it to '
         "cover everything. Read the procure://guide resource for the full usage "
         "guide, and fetch any hit's complete document via its `uri` "
@@ -100,17 +103,22 @@ class IngestResult(BaseModel):
 
 
 _service: RAGService | None = None
+_svc_lock = threading.Lock()
 
 
 def _svc() -> RAGService:
     global _service
     if _service is None:
-        _service = RAGService()
-        logger.info(
-            "RAG service ready: embeddings=%s vectordb=%s chunks=%d documents=%d",
-            _service.settings.embeddings, _service.settings.vectordb,
-            _service.vectors.count(), len(_service.meta.list()),
-        )
+        # Sync tools run in a threadpool: guard the lazy singleton so two
+        # concurrent calls can't build two RAGService instances.
+        with _svc_lock:
+            if _service is None:
+                _service = RAGService()
+                logger.info(
+                    "RAG service ready: embeddings=%s vectordb=%s chunks=%d documents=%d",
+                    _service.settings.embeddings, _service.settings.vectordb,
+                    _service.vectors.count(), _service.meta.count(),
+                )
     return _service
 
 
@@ -130,13 +138,22 @@ def procure_search(
         str | None,
         Field(description='Optional type filter: "memory" for cross-agent memories only, "document" for files/uploads only, omit for everything.'),
     ] = None,
+    source: Annotated[
+        str | None,
+        Field(description="Optional source filter: upload, text, url, or watch."),
+    ] = None,
+    since: Annotated[
+        str | None,
+        Field(description="Optional recency filter: only documents created at/after this ISO date (e.g. 2026-01-15)."),
+    ] = None,
 ) -> list[SearchHit]:
     """Advanced search over the procure library: hybrid BM25 + dense retrieval fused with RRF, then reranked by answerability. Returns matching chunks with filenames, relevance scores, and answerability signals. Use this whenever a question could pertain to stored documents, past conversations, or saved outputs. Pass doc_type="memory" when the user references previous work. Each hit's `uri` reads the full document."""
     svc = _svc()
-    logger.info("procure_search q=%r top_k=%d doc_ids=%s tags=%s doc_type=%s",
-                query[:120], top_k, doc_ids, tags, doc_type)
+    logger.info("procure_search q=%r top_k=%d doc_ids=%s tags=%s doc_type=%s source=%s since=%s",
+                query[:120], top_k, doc_ids, tags, doc_type, source, since)
     return [SearchHit(**h, uri=_doc_uri(h["doc_id"]))
-            for h in svc.search(query, top_k, doc_ids, tags, None, doc_type)]
+            for h in svc.search(query, top_k, doc_ids, tags, source,
+                                doc_type, since)]
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -145,11 +162,29 @@ def procure_list_documents(
         str | None,
         Field(description='Optional type filter: "memory" for cross-agent memories only, "document" for files/uploads only, omit for everything.'),
     ] = None,
+    source: Annotated[
+        str | None,
+        Field(description="Optional source filter: upload, text, url, or watch."),
+    ] = None,
+    query: Annotated[
+        str | None,
+        Field(description="Optional filename substring filter."),
+    ] = None,
+    limit: Annotated[
+        int,
+        Field(ge=1, le=500, description="Maximum documents to return."),
+    ] = 50,
+    offset: Annotated[
+        int,
+        Field(ge=0, description="Documents to skip (paging)."),
+    ] = 0,
 ) -> list[LibraryDoc]:
-    """List every document in the procure library with status and chunk counts. Use it to discover what is stored before searching, or to get document IDs for scoped search. Pass doc_type="memory" to browse only agent memories. Each entry's `uri` reads the full document."""
+    """List documents in the procure library with status and chunk counts. Use it to discover what is stored before searching, or to get document IDs for scoped search. Pass doc_type="memory" to browse only agent memories. Page large libraries with limit/offset. Each entry's `uri` reads the full document."""
     docs = [LibraryDoc(**d, uri=_doc_uri(d["doc_id"]))
-            for d in _svc().list_documents(doc_type)]
-    logger.info("procure_list_documents doc_type=%s -> %d docs", doc_type, len(docs))
+            for d in _svc().list_documents(doc_type, source, query,
+                                           limit, offset)]
+    logger.info("procure_list_documents doc_type=%s source=%s query=%s limit=%d offset=%d -> %d docs",
+                doc_type, source, query, limit, offset, len(docs))
     return docs
 
 
@@ -197,6 +232,60 @@ def procure_add_url(
     return result
 
 
+@mcp.tool()
+def procure_update_text(
+    doc_id: Annotated[str, Field(description="Document ID to update (see procure_list_documents).")],
+    text: Annotated[str, Field(description="Replacement full text: the document is re-chunked and re-embedded.")],
+    title: Annotated[
+        str | None,
+        Field(description="Optional new title (renames the document)."),
+    ] = None,
+    tags: Annotated[
+        list[str] | None,
+        Field(description="Optional new tags (replaces existing tags when given)."),
+    ] = None,
+) -> IngestResult:
+    """Replace a stored text's content in place. Use it to correct or supersede a memory or note: stale material is revised instead of accumulating forever. Only texts ingested via procure_add_text should be updated this way."""
+    logger.info("procure_update_text doc_id=%r chars=%d", doc_id, len(text or ""))
+    if not (text or "").strip():
+        raise ValueError("text must not be empty")
+    try:
+        result = IngestResult(
+            **_svc().update_document_text(doc_id, text, title, tags))
+    except KeyError:
+        raise ValueError(f"Unknown document: {doc_id}") from None
+    logger.info("procure_update_text -> %s", result)
+    return result
+
+
+@mcp.tool()
+def procure_delete_document(
+    doc_id: Annotated[str, Field(description="Document ID to delete (see procure_list_documents).")],
+) -> dict:
+    """Delete a document and all its chunks from the library. Use it to remove stale, wrong, or superseded memories. This cannot be undone."""
+    logger.info("procure_delete_document doc_id=%r", doc_id)
+    if not _svc().delete_document(doc_id):
+        raise ValueError(f"Unknown document: {doc_id}")
+    return {"deleted": doc_id}
+
+
+def tool_descriptions() -> list[dict]:
+    """Tool name + description for the workspace UI (single source)."""
+    out = []
+    for name in ("procure_search", "procure_list_documents",
+                 "procure_add_text", "procure_add_url",
+                 "procure_update_text", "procure_delete_document"):
+        fn = globals().get(name)
+        if fn is None:
+            continue
+        out.append({"name": name, "description": (fn.__doc__ or "").strip()})
+    out.append({"name": "procure://documents/{doc_id}",
+                "description": "Fetch the full text of a document found via search or listing."})
+    out.append({"name": "procure://guide",
+                "description": "Agent usage guide — how to search, read documents, and store memories."})
+    return out
+
+
 @mcp.resource(
     "procure://guide",
     name="procure-guide",
@@ -242,7 +331,21 @@ def main(argv: list[str] | None = None) -> None:
     # and gives the workspace UI an immediate first log line.
     print(f"procure MCP server listening on {url}", flush=True)
     logger.info("starting Streamable HTTP server on %s", url)
-    mcp.run(transport="streamable-http", host=args.host, port=args.port)
+    # The SDK auto-enables DNS-rebinding protection for localhost binds;
+    # pass it explicitly so a future default change can't silently open
+    # the server to cross-site hosts.
+    security = None
+    if args.host in ("127.0.0.1", "localhost", "::1"):
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
+            allowed_origins=["http://127.0.0.1:*", "http://localhost:*",
+                             "http://[::1]:*"],
+        )
+    mcp.run(transport="streamable-http", host=args.host, port=args.port,
+            transport_security=security)
 
 
 if __name__ == "__main__":

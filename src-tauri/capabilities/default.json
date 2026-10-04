@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Minimal capability: the UI is served by the sidecar and calls no Tauri JS APIs.",
-  "windows": ["main"],
-  "permissions": ["core:default"]
+  "description": "Sidecar-served UI plus the folder-picker dialog.",
+  "windows": ["main", "splash"],
+  "permissions": ["core:default", "dialog:allow-open"]
 }

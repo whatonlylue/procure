@@ -1,6 +1,6 @@
 [project]
 name = "procure"
-version = "0.2.2"
+version = "0.2.3"
 description = "Local-first RAG: drag-drop ingest, chunk+embed+store, semantic search."
 license = { text = "MIT" }
 requires-python = ">=3.11"
@@ -19,14 +19,32 @@ sbert = ["sentence-transformers>=3.0"]
 chroma = ["chromadb>=0.5"]
 ocr = ["rapidocr-onnxruntime>=1.0", "pymupdf>=1.24", "pillow>=10"]
 web = ["trafilatura>=1.0"]
-all = ["sentence-transformers>=3.0", "chromadb>=0.5", "rapidocr-onnxruntime>=1.0", "pymupdf>=1.24", "pillow>=10", "trafilatura>=1.0"]
+readability = ["readability-lxml>=0.8"]
+# Retrieval-benchmark dependencies (source checkouts only: app.bench is
+# excluded from built wheels/binaries below, so `pip install procure[bench]`
+# only makes sense alongside a git clone, for `bench pull --source beir`;
+# the default mteb pull path and the rest of the harness are stdlib-only).
+bench = ["pyarrow>=12"]
+dev = ["pyinstaller>=6"]
+all = ["sentence-transformers>=3.0", "chromadb>=0.5", "rapidocr-onnxruntime>=1.0", "pymupdf>=1.24", "pillow>=10", "trafilatura>=1.0", "readability-lxml>=0.8", "pyarrow>=12"]
+
+[project.scripts]
+procure = "app.cli:main"
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
+# app.bench is a source-only dev harness (stdlib-only): it stays in git for
+# `git clone` users but is excluded from wheels/sdists so app-only installs
+# never ship it. `procure bench` in cli.py degrades to a clear error there.
 include = ["app*"]
+exclude = ["app.bench", "app.bench.*"]
 
 [tool.setuptools.package-data]
-app = ["static/**"]
+app = ["static/**", "_skill_data/**"]
+
+[tool.ruff]
+target-version = "py311"
+select = ["F"]
