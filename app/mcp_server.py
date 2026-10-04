@@ -71,8 +71,6 @@ class SearchHit(BaseModel):
     sparse_score: float = Field(description="BM25 exact-word match strength.")
     dense_score: float = Field(description="Embedding cosine similarity.")
     fused_rank: int = Field(description="Rank after hybrid fusion, before rerank.")
-    answerability: float = Field(description="Likelihood this chunk answers the query.")
-    entailment: float = Field(description="P(chunk entails query); >=0.5 is a direct answer.")
     uri: str = Field(description="Resource URI for the full document text.")
 
 
@@ -141,7 +139,7 @@ def procure_search(
         Field(description="Optional recency filter: only documents created at/after this ISO date (e.g. 2026-01-15)."),
     ] = None,
 ) -> list[SearchHit]:
-    """Advanced search over the procure library: hybrid BM25 + dense retrieval fused with RRF, then reranked by answerability. Returns matching chunks with filenames, relevance scores, and answerability signals. Use this whenever a question could pertain to stored documents, past conversations, or saved outputs. Pass doc_type="memory" when the user references previous work. Each hit's `uri` reads the full document."""
+    """Advanced search over the procure library: hybrid BM25 + dense retrieval fused with RRF, then reranked with a cross-encoder. Returns matching chunks with filenames and relevance scores. Use this whenever a question could pertain to stored documents, past conversations, or saved outputs. Pass doc_type="memory" when the user references previous work. Each hit's `uri` reads the full document."""
     svc = _svc()
     logger.info("procure_search q=%r top_k=%d doc_ids=%s tags=%s doc_type=%s since=%s",
                 query[:120], top_k, doc_ids, tags, doc_type, since)

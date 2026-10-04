@@ -358,7 +358,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         print(f"error: {e}")
         return 1
     for i, h in enumerate(hits, 1):
-        print(f"#{i} [{h['score']:.3f}|ans {h['answerability']:.2f}] "
+        print(f"#{i} [{h['score']:.3f}] "
               f"{h['filename']} ({h['chunk_id']})")
         print(f"    {h['text'][:280].replace(chr(10), ' ')}")
     return 0

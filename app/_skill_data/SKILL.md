@@ -10,8 +10,8 @@ metadata:
 # procure
 
 procure is a local-first personal library: ingested documents are split into
-chunks, embedded, and stored for hybrid (keyword + meaning) search with an
-answerability reranker. This guide is also served live as the
+chunks, embedded, and stored for hybrid (keyword + meaning) search with a
+cross-encoder reranker. This guide is also served live as the
 `procure://guide` MCP resource.
 
 Documents have a type: `document` (files, uploads, ordinary notes)
@@ -22,13 +22,10 @@ harness). Filter by type whenever you only want one kind.
 
 - `procure_search(query, top_k=5, doc_ids=None, tags=None,
   doc_type=None, since=None)` — hybrid BM25 + dense
-  retrieval fused with RRF, reranked by answerability. Every hit carries
-  `doc_id`, `filename`, `doc_type`, `chunk_id`, `text`, `score`,
-  `sparse_score`, `dense_score`, `fused_rank`, `answerability`,
-  `entailment`, and a `uri` for the full document. `entailment >= 0.5`
-  means the chunk directly supports an answer (neural NLI only; it is
-  0 when the NLI model isn't loaded, e.g. the desktop default — use
-  `answerability` then). Use `doc_ids` to scope the search after
+  retrieval fused with RRF, reranked with a cross-encoder. Every hit
+  carries `doc_id`, `filename`, `doc_type`, `chunk_id`, `text`, `score`,
+  `sparse_score`, `dense_score`, `fused_rank`, and a `uri` for the full
+  document. Use `doc_ids` to scope the search after
   listing, `tags` to search only documents carrying all of those tags,
   `since` (ISO date, e.g. 2026-01-15) for recent documents, or
   `doc_type="memory"` to search only agent memories (`"document"` for
@@ -65,10 +62,10 @@ harness). Filter by type whenever you only want one kind.
 
 ## Workflows
 
-**Answering from the library.** Search first (`top_k` 5–10). If no hit has
-`entailment >= 0.5`, try a rephrased query or list documents and scope the
-search. Read `procure://documents/{doc_id}` for full context when a chunk
-is promising but incomplete. Cite the `filename` in answers.
+**Answering from the library.** Search first (`top_k` 5–10). If no hit
+looks like a direct answer, try a rephrased query or list documents and
+scope the search. Read `procure://documents/{doc_id}` for full context
+when a chunk is promising but incomplete. Cite the `filename` in answers.
 
 **Saving memories (when this MCP server is available).** When the user
 shares something worth keeping across sessions — preferences, decisions,
@@ -84,10 +81,9 @@ references previous work — "last time", "we discussed", "remember",
 "my project", "earlier", "before", "our decision", or any question prior
 context could answer — search memories first with
 `procure_search(query, doc_type="memory")` before answering from the
-general library or from scratch. If no memory hit has `entailment >=
-0.5` (or answerability is low), broaden to the full library (omit
-`doc_type`), try a rephrased query, or list memories with
-`procure_list_documents(doc_type="memory")`.
+general library or from scratch. If no memory hit looks relevant,
+broaden to the full library (omit `doc_type`), try a rephrased query,
+or list memories with `procure_list_documents(doc_type="memory")`.
 
 **Revising memories.** When a stored memory is wrong or outdated, fix it
 with `procure_update_text` (or remove it with

@@ -1,9 +1,8 @@
-"""Hybrid search: FTS5 sparse store, RRF fusion, CLEAR-style answerability.
+"""Hybrid search: FTS5 sparse store, RRF fusion, cross-encoder reranking.
 
-Sparse scoring is dependency-free (stdlib + sqlite3 FTS5). Neural rerank paths
-load lazily and offline-first; when a model is unavailable scoring falls
-back to the coverage heuristic. See arXiv:2609.03482 (CLEAR) for the
-``sigmoid(relevance) + alpha * entailment`` inference formula.
+Sparse scoring is dependency-free (stdlib + sqlite3 FTS5). The cross-encoder
+rerank path loads lazily and offline-first; when the model is unavailable
+scoring falls back to the coverage heuristic.
 """
 from __future__ import annotations
 
@@ -332,115 +331,9 @@ class CrossEncoderScorer:
         return [float(x) for x in out]
 
 
-class NLIEntailmentScorer:
-    """Frozen NLI teacher for answerability (CLEAR-style, inference only).
-
-    Scores P(entailment) with premise=chunk, hypothesis=query using a
-    DeBERTa-v3 NLI model — same family and task mixture (MNLI/FEVER/ANLI)
-    as CLEAR's frozen DeBERTa-v3-large teacher. Loaded lazily and
-    offline-first, mirroring :class:`CrossEncoderScorer`: returns None when
-    the model is not cached and downloads are disallowed.
-
-    Design caveat: the raw user query (often a question, not a declarative
-    hypothesis) is the NLI hypothesis, so P(entail) for "what is X?" is
-    semantically approximate — useful as a ranking signal, not a verdict.
-    """
-
-    def __init__(self, model_name: str = "", allow_download: bool = False):
-        self.model_name = (model_name or "").strip()
-        self.allow_download = allow_download
-        self._tok = None
-        self._model = None
-        self._entail_idx = 0
-        self._tried = False
-        self._lock = threading.Lock()
-
-    @property
-    def available(self) -> bool:
-        return self._load() is not None
-
-    @property
-    def loaded(self) -> bool:
-        """True once a model is in memory (never triggers a load)."""
-        with self._lock:
-            return self._model is not None
-
-    def _load(self):
-        with self._lock:
-            if self._tried:
-                return self._model
-            with _hf_offline(self.allow_download):
-                try:
-                    if not self.model_name:
-                        return None
-                    try:
-                        from transformers import (AutoModelForSequenceClassification,
-                                                  AutoTokenizer)
-                    except ImportError:
-                        return None
-                    try:
-                        self._tok = AutoTokenizer.from_pretrained(self.model_name)
-                        self._model = AutoModelForSequenceClassification.from_pretrained(
-                            self.model_name)
-                    except Exception:
-                        self._tok = None
-                        self._model = None
-                        return None
-                    try:
-                        labels = {str(k).lower(): int(v)
-                                  for k, v in self._model.config.label2id.items()}
-                        self._entail_idx = labels.get("entailment", 0)
-                    except Exception:
-                        self._entail_idx = 0
-                finally:
-                    self._tried = True
-            return self._model
-
-    def score(self, query: str, texts: list[str]) -> list[float] | None:
-        """P(entailment | chunk, query) per chunk, or None when unavailable."""
-        model = self._load()
-        if model is None or self._tok is None or not texts:
-            return None
-        try:
-            import torch
-            import torch.nn.functional as F
-        except ImportError:
-            return None
-        try:
-            out: list[float] = []
-            with torch.no_grad():
-                for i in range(0, len(texts), 8):
-                    batch = texts[i:i + 8]
-                    enc = self._tok(
-                        batch, [query] * len(batch),
-                        padding=True, truncation=True, max_length=512,
-                        return_tensors="pt",
-                    )
-                    logits = model(**enc).logits
-                    probs = F.softmax(logits, dim=-1)[:, self._entail_idx]
-                    out.extend(float(p) for p in probs.tolist())
-        except Exception:
-            return None
-        return out
-
-
 def sigmoid(xs: list[float]) -> list[float]:
     # Clamp: math.exp overflows for x < -709.
     return [1.0 / (1.0 + math.exp(-max(-500.0, min(500.0, x)))) for x in xs]
-
-
-def clear_answerability(rel: list[float], entail: list[float],
-                        alpha: float = 0.5) -> list[float]:
-    """CLEAR inference combination, normalized to [0, 1].
-
-    ``(sigmoid(relevance) + alpha * entailment) / (1 + alpha)``: the paper's
-    blend rescaled so the neural and heuristic paths share one scale (the
-    raw blend runs to 1 + alpha, which also leaked >100% into the UI).
-    Rescaling is monotonic, so rankings are unchanged. Both inputs align
-    by position.
-    """
-    scale = 1.0 + max(0.0, alpha)
-    return [(r + alpha * e) / scale for r, e in zip(sigmoid(rel), entail)]
 
 
 def combine_answerability(cross: list[float] | None,

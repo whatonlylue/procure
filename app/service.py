@@ -14,9 +14,7 @@ from app.config import Settings, get_settings
 from app.embeddings import Model2VecEmbedder
 from app.search import (
     CrossEncoderScorer,
-    NLIEntailmentScorer,
     SparseStore,
-    clear_answerability,
     combine_answerability,
     content_terms,
     coverage_score,
@@ -35,7 +33,7 @@ _RETRIEVE_MULT = 5
 _RETRIEVE_MIN = 25
 _RERANK_MULT = 3
 _RERANK_MIN = 15
-# Final blend: normalized fused retrieval score vs answerability.
+# Final blend: normalized fused retrieval score vs rerank signal.
 _W_FUSED = 0.5
 _W_ANSWER = 0.5
 
@@ -88,10 +86,6 @@ class RAGService:
         self._cross = CrossEncoderScorer(
             self.settings.cross_encoder_model,
             self.settings.cross_encoder_download,
-        )
-        self._nli = NLIEntailmentScorer(
-            self.settings.nli_model,
-            self.settings.nli_download,
         )
         # Serializes check-then-insert ingest within this process (job
         # workers race otherwise). Cross-process (workspace +
@@ -661,24 +655,13 @@ class RAGService:
         }
 
         answer: dict[str, float] = {}
-        entail: dict[str, float] = {}
         if rerank_on and texts:
             pool_texts = [texts[cid] for cid in texts]
             cross = self._cross.score(query, pool_texts)
-            # NLI only runs when the cross-encoder did: the fallback path
-            # never consumes entailment, so running it alone is pure waste.
-            ent = self._nli.score(query, pool_texts) if cross is not None else None
-            if cross is not None and ent is not None:
-                # CLEAR inference (mode "all"): sigmoid(relevance) + alpha * entailment.
-                for cid, a, e in zip(texts, clear_answerability(
-                        cross, ent, self.settings.alpha_nli), ent):
-                    answer[cid] = a
-                    entail[cid] = e
-            else:
-                idf = self.sparse.idf_map(content_terms(query))
-                cov = [coverage_score(query, texts[cid], idf) for cid in texts]
-                for cid, a in zip(texts, combine_answerability(cross, cov)):
-                    answer[cid] = a
+            idf = self.sparse.idf_map(content_terms(query))
+            cov = [coverage_score(query, texts[cid], idf) for cid in texts]
+            for cid, a in zip(texts, combine_answerability(cross, cov)):
+                answer[cid] = a
 
         if rerank_on and texts:
             fnorm = minmax_norm({cid: fused[cid] for cid in texts})
@@ -703,8 +686,6 @@ class RAGService:
                 "dense_score": round(float(
                     dense_by_id[cid].score if cid in dense_by_id else 0.0), 4),
                 "fused_rank": fused_rank[cid],
-                "answerability": round(float(answer.get(cid, 0.0)), 4),
-                "entailment": round(float(entail.get(cid, 0.0)), 4),
             })
         return out
 

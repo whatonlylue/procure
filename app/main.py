@@ -145,12 +145,11 @@ def health() -> dict:
         "documents": svc.meta.count(),
         "search": svc.settings.search_mode,
         "rerank": svc.settings.rerank,
-        # Cheap flags only: .available would LOAD the NLI model on first
+        # Cheap flags only: .available would LOAD the model on first
         # call, and the frontend polls health after every action.
         "rerank_backend": "neural" if neural else "heuristic",
         "rerank_models_loaded": {
             "cross_encoder": svc._cross.loaded,
-            "nli": svc._nli.loaded,
         },
         "mcp_autostart": svc.settings.mcp_autostart,
         "dense": svc.dimension_status(),

@@ -15,8 +15,7 @@ from unittest import mock
 from app import chunking, extract, mcp_server, skills
 from app.config import Settings
 from app.jobs import JobManager
-from app.search import (clear_answerability, combine_answerability,
-                        coverage_score, sigmoid)
+from app.search import (combine_answerability, coverage_score, sigmoid)
 from app.service import RAGService
 from stub_embedder import StubEmbedder
 from app.store import MetaStore
@@ -178,11 +177,7 @@ class ExtractFixTest(unittest.TestCase):
 
 
 class RankingBoundsTest(unittest.TestCase):
-    def test_answerability_stays_in_unit_interval(self) -> None:
-        for a in clear_answerability([0.0, 10.0, -1000.0, 1000.0],
-                                     [0.0, 1.0, 0.5, 0.0], alpha=0.5):
-            self.assertGreaterEqual(a, 0.0)
-            self.assertLessEqual(a, 1.0)
+    def test_rerank_stays_in_unit_interval(self) -> None:
         for a in combine_answerability([100.0, -100.0, 0.0], [0.5, 0.5, 0.5]):
             self.assertGreaterEqual(a, 0.0)
             self.assertLessEqual(a, 1.0)
@@ -190,6 +185,21 @@ class RankingBoundsTest(unittest.TestCase):
         lo, hi = sigmoid([-1000.0, 1000.0])
         self.assertLess(lo, 1e-200)
         self.assertEqual(hi, 1.0)
+
+    def test_search_hits_carry_no_nli_scores(self) -> None:
+        """NLI removal lock: hits expose no answerability/entailment keys."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        svc = _svc(tmp.name)
+        svc.ingest_text("note.md", "The north beacon was relamped in April.")
+        hits = svc.search("when was the beacon relamped?")
+        self.assertTrue(hits)
+        for h in hits:
+            self.assertNotIn("answerability", h)
+            self.assertNotIn("entailment", h)
+        self.assertFalse(hasattr(svc.settings, "nli_model"))
+        self.assertFalse(hasattr(svc.settings, "alpha_nli"))
+        self.assertFalse(hasattr(svc, "_nli"))
 
     def test_phrase_bonus_uses_raw_bigrams(self) -> None:
         score = coverage_score("capital of france",

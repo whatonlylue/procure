@@ -648,7 +648,7 @@ export default function App() {
         <div className="side-label">SEARCH SETUP</div>
         <dl className="side-meta mono">
           <div title="How results are found"><dt>MATCHING</dt><dd>{mode}</dd></div>
-          <div title={neural ? "Neural cross-encoder + NLI when loaded, word-match coverage otherwise" : "Word-match coverage (no neural models in this build)"}><dt>ANSWER RANK</dt><dd>{rerank}</dd></div>
+          <div title={neural ? "Neural cross-encoder when loaded, word-match coverage otherwise" : "Word-match coverage (no neural models in this build)"}><dt>ANSWER RANK</dt><dd>{rerank}</dd></div>
           <div><dt>RESULTS</dt><dd>{topK}</dd></div>
           <div><dt>CHUNKS</dt><dd>{backend?.chunks ?? "—"}</dd></div>
           <div><dt>READY</dt><dd>{ready}{scopeTruncated ? "+" : ""}/{docsTotal}</dd></div>
@@ -878,19 +878,6 @@ export default function App() {
                   <div className="signals mono">
                     <span title="Exact-word match strength, relative to the best match in these results">WORD MATCH <b>{sparseMax > 0 ? fmt((h.sparse_score ?? 0) / sparseMax) : "0%"}</b></span>
                     <span title="How close the meaning is to your query">MEANING <b>{fmt(h.dense_score)}</b></span>
-                    {!off && (
-                      <span title="How likely this passage answers your query" className="ans">
-                        ANSWER <b>{fmt(h.answerability)}</b>
-                        <span className="minibar">
-                          <i style={{ width: `${Math.max(0, Math.min(1, h.answerability ?? 0)) * 100}%` }} />
-                        </span>
-                      </span>
-                    )}
-                    {!off && (h.entailment ?? 0) >= 0.5 && (
-                      <span className="direct" title="This passage directly supports an answer to your query">
-                        DIRECT ANSWER
-                      </span>
-                    )}
                   </div>
                 </li>
               ))}

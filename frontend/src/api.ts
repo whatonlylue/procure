@@ -37,8 +37,6 @@ export interface Hit {
   sparse_score?: number;
   dense_score?: number;
   fused_rank?: number;
-  answerability?: number;
-  entailment?: number;
 }
 
 export interface DenseStatus {
@@ -57,7 +55,7 @@ export interface Health {
   search: string;
   rerank: string;
   rerank_backend?: string;
-  rerank_models_loaded?: { cross_encoder: boolean; nli: boolean };
+  rerank_models_loaded?: { cross_encoder: boolean };
   mcp_autostart?: boolean;
   dense?: DenseStatus;
   ocr?: string;

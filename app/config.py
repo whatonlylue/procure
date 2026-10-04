@@ -47,23 +47,15 @@ class Settings:
     chunk_overlap: int = field(default_factory=lambda: int(_env("PROCURE_CHUNK_OVERLAP", "150")))
     # Search: "hybrid" (BM25 + dense with RRF fusion) | "dense" (cosine only)
     search_mode: str = field(default_factory=lambda: _env("PROCURE_SEARCH", "hybrid").lower())
-    # Answerability rerank on top of retrieval: "on" | "off"
+    # Rerank on top of retrieval: "on" | "off"
     rerank: str = field(default_factory=lambda: _env("PROCURE_RERANK", "on").lower())
     top_k: int = field(default_factory=lambda: int(_env("PROCURE_TOPK", "5")))
-    # Local cross-encoder model for the answerability reranker (cached only
+    # Local cross-encoder model for the reranker (cached only
     # unless PROCURE_CROSS_ENCODER_ALLOW_DOWNLOAD=1); "" disables it.
     cross_encoder_model: str = field(default_factory=lambda: _env(
         "PROCURE_CROSS_ENCODER", "cross-encoder/ettin-reranker-17m-v1"))
     cross_encoder_download: bool = field(default_factory=lambda: _truthy(_env(
         "PROCURE_CROSS_ENCODER_ALLOW_DOWNLOAD", "0")))
-    # Frozen NLI teacher for CLEAR-style answerability (same DeBERTa-v3 NLI
-    # family as the paper's teacher); "" disables it.
-    nli_model: str = field(default_factory=lambda: _env(
-        "PROCURE_NLI_MODEL", "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"))
-    nli_download: bool = field(default_factory=lambda: _truthy(_env(
-        "PROCURE_NLI_ALLOW_DOWNLOAD", "0")))
-    # CLEAR inference weight: score = sigmoid(relevance) + alpha * entailment.
-    alpha_nli: float = field(default_factory=lambda: float(_env("PROCURE_ALPHA_NLI", "0.5")))
     # MCP server (Streamable HTTP) bind address. Served at http://host:port/mcp.
     mcp_host: str = field(default_factory=lambda: _env("PROCURE_MCP_HOST", "127.0.0.1"))
     mcp_port: int = field(default_factory=lambda: int(_env("PROCURE_MCP_PORT", "8001")))
