@@ -87,6 +87,19 @@ class SettingsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.svc.update_settings(None, "sometimes")
 
+    def test_default_cross_encoder_is_ettin(self) -> None:
+        prev = os.environ.pop("PROCURE_CROSS_ENCODER", None)
+        try:
+            self.assertEqual(
+                Settings().cross_encoder_model,
+                "cross-encoder/ettin-reranker-17m-v1")
+        finally:
+            if prev is not None:
+                os.environ["PROCURE_CROSS_ENCODER"] = prev
+        # The service must wire the configured model into its scorer.
+        self.assertEqual(self.svc._cross.model_name,
+                         self.svc.settings.cross_encoder_model)
+
 
 class McpResourceTest(unittest.TestCase):
     def setUp(self) -> None:

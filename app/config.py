@@ -53,7 +53,7 @@ class Settings:
     # Local cross-encoder model for the answerability reranker (cached only
     # unless PROCURE_CROSS_ENCODER_ALLOW_DOWNLOAD=1); "" disables it.
     cross_encoder_model: str = field(default_factory=lambda: _env(
-        "PROCURE_CROSS_ENCODER", "cross-encoder/ms-marco-MiniLM-L6-v2"))
+        "PROCURE_CROSS_ENCODER", "cross-encoder/ettin-reranker-17m-v1"))
     cross_encoder_download: bool = field(default_factory=lambda: _truthy(_env(
         "PROCURE_CROSS_ENCODER_ALLOW_DOWNLOAD", "0")))
     # Frozen NLI teacher for CLEAR-style answerability (same DeBERTa-v3 NLI
