@@ -7,7 +7,6 @@ Stdlib unittest only (no new harness). Run from the project root:
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 import unittest
 import zipfile
@@ -30,7 +29,6 @@ LONG_B = ("Harbor tide tables for April. Ferries follow the morning tide. " * 40
 def _settings(tmp: str, **kw) -> Settings:
     s = Settings()
     s.data_dir = tmp
-    s.embeddings = "hash"
     for k, v in kw.items():
         setattr(s, k, v)
     return s
@@ -210,7 +208,7 @@ class VectorDimTest(unittest.TestCase):
             store.upsert(["a", "b"], ["d", "d"],
                          [[1.0, 2.0], [1.0, 2.0, 3.0]], ["x", "y"])
 
-    def test_backend_switch_is_reported_not_silent(self) -> None:
+    def test_dim_change_is_reported_not_silent(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         svc = _svc(tmp.name)
@@ -607,76 +605,6 @@ class SettingsPersistTest(unittest.TestCase):
         self.assertEqual(fresh.search_mode, "dense")
         self.assertEqual(fresh.rerank, "off")
         self.assertTrue(fresh.mcp_autostart)
-
-
-class FakeCollection:
-    def __init__(self):
-        self.rows: dict[str, dict] = {}
-
-    def upsert(self, ids, embeddings, documents, metadatas):
-        for i, d, t, m in zip(ids, embeddings, documents, metadatas):
-            self.rows[i] = {"emb": d, "doc": t, "meta": m}
-
-    def get(self, where=None, limit=None, offset=0, include=None):
-        items = list(self.rows.items())
-        if where and "doc_id" in where:
-            items = [(k, v) for k, v in items
-                     if v["meta"].get("doc_id") == where["doc_id"]]
-        page = items[offset:(offset + limit) if limit else None]
-        out: dict = {"ids": [k for k, _ in page]}
-        if include and "documents" in include:
-            out["documents"] = [v["doc"] for _, v in page]
-        if include and "metadatas" in include:
-            out["metadatas"] = [v["meta"] for _, v in page]
-        return out
-
-    def delete(self, ids):
-        for i in ids:
-            self.rows.pop(i, None)
-
-    def query(self, query_embeddings, n_results, where=None, include=None):
-        got = self.get(where=where, limit=n_results, include=include)
-        n = len(got["ids"])
-        return {"ids": [got["ids"]],
-                "distances": [[0.1] * n],
-                "metadatas": [got.get("metadatas", [{}] * n)],
-                "documents": [got.get("documents", [""] * n)]}
-
-    def count(self):
-        return len(self.rows)
-
-
-class ChromaShimTest(unittest.TestCase):
-    def test_paging_and_short_distances(self) -> None:
-        import types
-
-        from app.vectordb import chroma_vec
-
-        fake_mod = types.ModuleType("chromadb")
-
-        class FakeClient:
-            def __init__(self, path):
-                self.collection = FakeCollection()
-
-            def get_or_create_collection(self, *a, **k):
-                return self.collection
-
-        fake_mod.PersistentClient = FakeClient
-        with mock.patch.dict(sys.modules, {"chromadb": fake_mod}):
-            store = chroma_vec.ChromaVectorStore("/tmp/nowhere")
-            ids = [f"d:{i}" for i in range(6000)]
-            store.upsert(ids, ["d"] * 6000, [[0.1]] * 6000,
-                         ["t"] * 6000)
-            self.assertEqual(store.count(), 6000)
-            self.assertEqual(len(store.get_by_doc("d")), 6000)
-            # Distances shorter than ids must not IndexError.
-            res = store.collection.query([0.1], 3, include=[])
-            res["distances"] = [[]]
-            with mock.patch.object(store.collection, "query",
-                                   return_value=res):
-                hits = store.search([0.1], 3)
-            self.assertEqual(len(hits), 3)
-            self.assertEqual(store.delete_by_doc("d"), 6000)
 
 
 if __name__ == "__main__":

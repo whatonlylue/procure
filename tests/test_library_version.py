@@ -32,7 +32,6 @@ TEXT_B = (
 def _svc(tmp: str) -> RAGService:
     s = Settings()
     s.data_dir = tmp
-    s.embeddings = "hash"
     return RAGService(s)
 
 

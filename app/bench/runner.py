@@ -165,8 +165,6 @@ def _service_config(service) -> dict:
     cfg = {
         "search_mode": getattr(settings, "search_mode", "?"),
         "rerank": getattr(settings, "rerank", "?"),
-        "embeddings": getattr(settings, "embeddings", "?"),
-        "vectordb": getattr(settings, "vectordb", "?"),
     }
     try:
         cfg["chunk_count"] = int(service.vectors.count())

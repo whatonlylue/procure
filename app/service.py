@@ -12,7 +12,7 @@ from functools import lru_cache
 
 from app import chunking, extract
 from app.config import Settings, get_settings
-from app.embeddings.factory import get_embedder
+from app.embeddings.local_hash import HashEmbedder
 from app.search import (
     CrossEncoderScorer,
     NLIEntailmentScorer,
@@ -25,8 +25,7 @@ from app.search import (
     rrf_fuse,
 )
 from app.store import MetaStore, normalize_doc_type
-from app.vectordb.factory import get_vector_store
-from app.vectordb.sqlite_vec import DimensionMismatchError
+from app.vectordb.sqlite_vec import DimensionMismatchError, SqliteVectorStore
 
 __all__ = ["RAGService", "content_hash", "get_service", "DimensionMismatchError"]
 
@@ -61,8 +60,8 @@ class RAGService:
         self.settings = settings or get_settings()
         os.makedirs(self.settings.raw_dir, exist_ok=True)
         self.meta = MetaStore(self.settings.meta_db)
-        self.embedder = get_embedder(self.settings)
-        self.vectors = get_vector_store(self.settings)
+        self.embedder = HashEmbedder(self.settings.hash_dim)
+        self.vectors = SqliteVectorStore(self.settings.vec_db)
         self.sparse = SparseStore(self.settings.sparse_db)
         self._cross = CrossEncoderScorer(
             self.settings.cross_encoder_model,
@@ -556,14 +555,14 @@ class RAGService:
         if self._embed_dim_cached is None:
             try:
                 self._embed_dim_cached = int(self.embedder.dim)
-            except Exception:  # e.g. cloud probe offline: dim unknown
+            except Exception:  # embedder misconfigured: dim unknown
                 return None
         return self._embed_dim_cached
 
     def dimension_status(self) -> dict:
         """Compare stored vector dims with the active embedder.
 
-        Switching PROCURE_EMBEDDINGS leaves old vectors behind; dense
+        Changing PROCURE_HASH_DIM leaves old vectors behind; dense
         search skips them, so report it instead of failing silently.
         """
         stored = getattr(self.vectors, "stored_dim", lambda: None)()

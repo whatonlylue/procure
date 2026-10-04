@@ -20,7 +20,6 @@ from app.service import RAGService
 def _settings(tmp: str) -> Settings:
     s = Settings()
     s.data_dir = tmp
-    s.embeddings = "hash"
     return s
 
 
