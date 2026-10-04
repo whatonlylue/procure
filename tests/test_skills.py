@@ -6,7 +6,6 @@ Stdlib unittest only (no new harness). Run from the project root:
 """
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 import unittest
@@ -38,28 +37,6 @@ class SkillSourceTest(unittest.TestCase):
 
     def test_no_legacy_guide_file(self) -> None:
         self.assertFalse((REPO_ROOT / "app" / "mcp_guide.md").exists())
-
-
-class SkillManifestTest(unittest.TestCase):
-    def test_plugin_manifests_consistent(self) -> None:
-        plugin = json.loads(
-            (REPO_ROOT / ".claude-plugin" / "plugin.json").read_text())
-        market = json.loads(
-            (REPO_ROOT / ".claude-plugin" / "marketplace.json").read_text())
-        self.assertEqual(plugin["name"], "procure")
-        self.assertEqual(len(market["plugins"]), 1)
-        entry = market["plugins"][0]
-        self.assertEqual(entry["name"], plugin["name"])
-        self.assertEqual(entry["version"], plugin["version"])
-        self.assertEqual(entry["source"], "./")
-        self.assertTrue(
-            (REPO_ROOT / "skills" / plugin["name"] / "SKILL.md").is_file())
-
-    def test_mcp_json_points_at_local_server(self) -> None:
-        conf = json.loads((REPO_ROOT / ".mcp.json").read_text())
-        srv = conf["mcpServers"]["procure"]
-        self.assertIn("http", srv["type"])
-        self.assertTrue(srv["url"].endswith("/mcp"))
 
 
 class SkillInstallTest(unittest.TestCase):

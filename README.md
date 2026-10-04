@@ -46,7 +46,7 @@ Then install the agent skill so harnesses proactively search the library and sav
 uv run python -m app.cli install-skills
 ```
 
-Claude Code users can instead install the bundled plugin (`/plugin marketplace add whatonlylue/procure`, then `/plugin install procure`), which wires the MCP server and the skill together. The same content is always served live as the `procure://guide` resource.
+The same content is always served live as the `procure://guide` resource.
 
 ## Configuration
 

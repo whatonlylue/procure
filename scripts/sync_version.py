@@ -6,14 +6,12 @@ Usage (from the repo root, after bumping ``app/version.py``)::
     python scripts/sync_version.py
 
 Files updated: pyproject.toml, frontend/package.json,
-src-tauri/Cargo.toml, src-tauri/tauri.conf.json,
-.claude-plugin/plugin.json, .claude-plugin/marketplace.json.
+src-tauri/Cargo.toml, src-tauri/tauri.conf.json.
 The frontend UI, fetch user agent, and ``--version`` read the version
 at runtime from the backend, so they need no sync.
 """
 from __future__ import annotations
 
-import json
 import re
 import sys
 from pathlib import Path
@@ -45,17 +43,6 @@ def main() -> None:
 
     _sub(ROOT / "src-tauri" / "tauri.conf.json",
          r'"version": "[^"]+"', f'"version": "{v}"')
-
-    for name in ("plugin.json", "marketplace.json"):
-        p = ROOT / ".claude-plugin" / name
-        data = json.loads(p.read_text(encoding="utf-8"))
-        if name == "plugin.json":
-            data["version"] = v
-        else:
-            for entry in data.get("plugins", []):
-                entry["version"] = v
-        p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        print(f"  {p.relative_to(ROOT)}")
     print("done.")
 
 
