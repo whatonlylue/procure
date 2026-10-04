@@ -16,12 +16,12 @@ attributable at a glance. The MCP server is not an independent binary
 (it re-invokes this one via the `mcp-server` subcommand), so it
 deliberately shares the ProcureHelper name rather than getting its own.
 
-Embeddings run on ONNX Runtime (granite-embedding-small-english-r2,
-app/embeddings.py), so onnxruntime + tokenizers + huggingface_hub ship in
-the sidecar and the model (~100MB fp16) downloads once into the HF cache
-on first ingest. The torch rerank stack (torch, sentence-transformers,
-transformers) stays excluded: every neural import in app/ degrades
-gracefully, which keeps torch's ~2GB out of the binary.
+Embeddings run on model2vec (potion-retrieval-32M, app/embeddings.py),
+so model2vec + huggingface_hub ship in the sidecar and the model
+(~120MB) downloads once into the HF cache on first ingest. The torch
+rerank stack (torch, sentence-transformers, transformers) stays excluded:
+every neural import in app/ degrades gracefully, which keeps torch's
+~2GB out of the binary.
 
 The benchmark harness (app.bench) is likewise excluded: it is source-only
 (still in git for `git clone` users, but not in wheels either), and
@@ -55,7 +55,8 @@ a = Analysis(
         "torch",
         "sentence_transformers",
         "transformers",
-        "safetensors",
+        # NOTE: "safetensors" must NOT be excluded: model2vec loads
+        # model.safetensors at startup via a lazy persistence import.
         "sklearn",
         "scipy",
         "pandas",

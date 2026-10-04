@@ -11,7 +11,7 @@ from functools import lru_cache
 
 from app import chunking, extract
 from app.config import Settings, get_settings
-from app.embeddings import GraniteEmbedder
+from app.embeddings import Model2VecEmbedder
 from app.search import (
     CrossEncoderScorer,
     NLIEntailmentScorer,
@@ -78,10 +78,9 @@ class RAGService:
             self.embedder = embedder
         else:
             s = self.settings
-            self.embedder = GraniteEmbedder(
-                model=s.embedding_model, model_file=s.embedding_file,
+            self.embedder = Model2VecEmbedder(
+                model=s.embedding_model,
                 model_dir=s.embedding_dir or None,
-                providers=s.embedding_providers,
                 batch_size=s.embedding_batch,
                 max_length=s.embedding_max_length)
         self.vectors = SqliteVectorStore(self.settings.vec_db)
@@ -498,8 +497,8 @@ class RAGService:
     def embedding_status(self) -> dict:
         """Cheap embedding-backend status for /api/health.
 
-        Never downloads the model or runs inference; providers_active is
-        empty until the first embed loads the session.
+        Never downloads the model or runs inference; loaded is False
+        until the first embed call.
         """
         info = getattr(self.embedder, "info", None)
         if callable(info):
@@ -509,9 +508,8 @@ class RAGService:
                 pass
         return {"backend": self._current_backend(),
                 "dim": self._current_dim(),
-                "loaded": False,
-                "providers_requested": [],
-                "providers_active": []}
+                "device": "cpu",
+                "loaded": False}
 
     def dimension_status(self) -> dict:
         """Compare stored vectors with the active embedding backend.

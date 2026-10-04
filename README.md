@@ -17,7 +17,7 @@
 - **Library tab** — per-document status (`ready`/`failed`), chunk counts, tags, delete, re-ingest.
 - **MCP server tab** — one click starts a Streamable-HTTP Model Context Protocol server exposing `procure_search` (tag + type + recency scope), `procure_add_text`, `procure_update_text`, `procure_delete_document`, `procure_list_documents` (paged + filtered), plus `procure://documents/{id}` full-text resources — any agent harness can search, read, write, revise, and delete in the library.
 - **Cross-agent memories** — documents typed `memory` are shared across agent sessions and harnesses: agents save with `procure_add_text(..., doc_type="memory")` and recall with `procure_search(..., doc_type="memory")` whenever the user references previous work.
-- **Local-only pipeline** — granite-embedding-small-english-r2 (384-dim, Apache-2.0, fp16 ONNX) served by ONNX Runtime on whatever GPU is present (CUDA · CoreML · DirectML · ROCm · OpenVINO, CPU fallback) plus a SQLite vector store; no accounts, no cloud. The ~100MB model downloads once into the HF cache on first ingest.
+- **Local-only pipeline** — potion-retrieval-32M (512-dim, MIT, static model2vec embeddings) running on CPU (no GPU mode exists — static lookup, ~16k texts/s) plus a SQLite vector store; no accounts, no cloud. The ~120MB model downloads once into the HF cache on first ingest.
 
 On a 10-book / 10-query eval, hybrid + CLEAR rerank reaches **9/10 top-1 (MRR 0.950)**, vs 6/10 dense-only.
 
@@ -52,10 +52,9 @@ The same content is always served live as the `procure://guide` resource.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PROCURE_EMBEDDING_PROVIDERS` | auto | comma-separated ONNX provider override, e.g. `cuda` or `cpu` (auto picks the best available: CUDA → CoreML → ROCm/MIGraphX → DirectML → OpenVINO → CPU; NVIDIA GPUs need `onnxruntime-gpu` instead of `onnxruntime`) |
-| `PROCURE_EMBEDDING_FILE` | `onnx/model_fp16.onnx` | model file inside the repo (`onnx/model.onnx` is fp32; `onnx/model_quantized.onnx` is smaller/CPU-lean) |
+| `PROCURE_EMBEDDING_MODEL` | `minishlab/potion-retrieval-32M` | HF repo for the model2vec static embedding model |
 | `PROCURE_EMBEDDING_DIR` | HF cache | pre-downloaded model repo checkout (offline use) |
-| `PROCURE_EMBEDDING_BATCH` / `PROCURE_EMBEDDING_MAX_LENGTH` | `32` / `2048` | texts per inference step · token cap per text (model max 8192) |
+| `PROCURE_EMBEDDING_BATCH` / `PROCURE_EMBEDDING_MAX_LENGTH` | `32` / `512` | texts per inference step · token cap per text |
 | `PROCURE_SEARCH` / `PROCURE_RERANK` | `hybrid` / `on` | retrieval mode · answerability rerank |
 | `PROCURE_TOPK` | `5` | default hits per query |
 | `PROCURE_CROSS_ENCODER_ALLOW_DOWNLOAD` / `PROCURE_NLI_ALLOW_DOWNLOAD` | `0` | set `1` once to fetch neural models, then stays offline |

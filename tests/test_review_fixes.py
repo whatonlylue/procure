@@ -470,7 +470,7 @@ class CliTest(unittest.TestCase):
             f.write(LONG_A)
         # The CLI builds its own RAGService; keep this hermetic (no model
         # download) by substituting the deterministic test embedder.
-        with mock.patch("app.service.GraniteEmbedder",
+        with mock.patch("app.service.Model2VecEmbedder",
                         lambda *a, **k: StubEmbedder()):
             self.assertEqual(
                 cli.main(["add", path, "--data-dir",

@@ -1,4 +1,4 @@
-"""Central settings. Local-only: granite ONNX embeddings + sqlite store, tuned via env flags."""
+"""Central settings. Local-only: model2vec static embeddings + sqlite store, tuned via env flags."""
 from __future__ import annotations
 
 import json
@@ -29,24 +29,20 @@ class Settings:
     (see RAGService.update_settings); env flags still set the startup values."""
 
     data_dir: str = field(default_factory=_default_data_dir)
-    # Granite R2 embedding backend (ONNX Runtime; GPU when available).
+    # potion-retrieval-32M embedding backend (model2vec; CPU-only by
+    # design -- static numpy embeddings, no GPU mode exists).
     # See app/embeddings.py for the full flag list.
     embedding_model: str = field(default_factory=lambda: _env(
         "PROCURE_EMBEDDING_MODEL",
-        "onnx-community/granite-embedding-small-english-r2-ONNX"))
-    embedding_file: str = field(default_factory=lambda: _env(
-        "PROCURE_EMBEDDING_FILE", "onnx/model_fp16.onnx"))
+        "minishlab/potion-retrieval-32M"))
     # Local checkout of the model repo (offline use); "" downloads once
     # into the Hugging Face cache.
     embedding_dir: str = field(default_factory=lambda: _env(
         "PROCURE_EMBEDDING_DIR", ""))
-    # Comma-separated provider override (e.g. "cuda" or "cpu"); "" = auto.
-    embedding_providers: str = field(default_factory=lambda: _env(
-        "PROCURE_EMBEDDING_PROVIDERS", ""))
     embedding_batch: int = field(default_factory=lambda: int(_env(
         "PROCURE_EMBEDDING_BATCH", "32")))
     embedding_max_length: int = field(default_factory=lambda: int(_env(
-        "PROCURE_EMBEDDING_MAX_LENGTH", "2048")))
+        "PROCURE_EMBEDDING_MAX_LENGTH", "512")))
     chunk_size: int = field(default_factory=lambda: int(_env("PROCURE_CHUNK_SIZE", "1000")))
     chunk_overlap: int = field(default_factory=lambda: int(_env("PROCURE_CHUNK_OVERLAP", "150")))
     # Search: "hybrid" (BM25 + dense with RRF fusion) | "dense" (cosine only)
