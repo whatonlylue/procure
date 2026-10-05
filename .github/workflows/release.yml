@@ -114,8 +114,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
           Copy-Item dist/ProcureHelper.exe "src-tauri/binaries/ProcureHelper-$triple.exe"
 
+      - uses: cargo-bins/cargo-binstall@main
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
+        run: cargo binstall tauri-cli --version "^2" --no-confirm
 
       - name: Build Tauri bundle
         run: cargo tauri build --bundles ${{ matrix.bundles }}
