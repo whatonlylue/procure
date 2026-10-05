@@ -3,8 +3,8 @@
 # (see scripts/build_desktop.sh for the equivalent local macOS build).
 name: release
 
-on: workflow_dispatch
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
