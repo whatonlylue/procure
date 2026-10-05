@@ -71,8 +71,6 @@ class SearchHit(BaseModel):
     sparse_score: float = Field(description="BM25 exact-word match strength.")
     dense_score: float = Field(description="Embedding cosine similarity.")
     fused_rank: int = Field(description="Rank after hybrid fusion, before rerank.")
-    answerability: float = Field(description="Likelihood this chunk answers the query.")
-    entailment: float = Field(description="P(chunk entails query); >=0.5 is a direct answer.")
     uri: str = Field(description="Resource URI for the full document text.")
 
 
@@ -84,7 +82,6 @@ class LibraryDoc(BaseModel):
     error: str = ""
     created_at: str = ""
     tags: list[str] = []
-    source: str = ""
     doc_type: str = Field(
         default="document",
         description='"document" or "memory" (cross-agent memory).')
@@ -137,21 +134,17 @@ def procure_search(
         str | None,
         Field(description='Optional type filter: "memory" for cross-agent memories only, "document" for files/uploads only, omit for everything.'),
     ] = None,
-    source: Annotated[
-        str | None,
-        Field(description="Optional source filter: upload, text, url, or watch."),
-    ] = None,
     since: Annotated[
         str | None,
         Field(description="Optional recency filter: only documents created at/after this ISO date (e.g. 2026-01-15)."),
     ] = None,
 ) -> list[SearchHit]:
-    """Advanced search over the procure library: hybrid BM25 + dense retrieval fused with RRF, then reranked by answerability. Returns matching chunks with filenames, relevance scores, and answerability signals. Use this whenever a question could pertain to stored documents, past conversations, or saved outputs. Pass doc_type="memory" when the user references previous work. Each hit's `uri` reads the full document."""
+    """Advanced search over the procure library: hybrid BM25 + dense retrieval fused with RRF, then reranked with a cross-encoder. Returns matching chunks with filenames and relevance scores. Use this whenever a question could pertain to stored documents, past conversations, or saved outputs. Pass doc_type="memory" when the user references previous work. Each hit's `uri` reads the full document."""
     svc = _svc()
-    logger.info("procure_search q=%r top_k=%d doc_ids=%s tags=%s doc_type=%s source=%s since=%s",
-                query[:120], top_k, doc_ids, tags, doc_type, source, since)
+    logger.info("procure_search q=%r top_k=%d doc_ids=%s tags=%s doc_type=%s since=%s",
+                query[:120], top_k, doc_ids, tags, doc_type, since)
     return [SearchHit(**h, uri=_doc_uri(h["doc_id"]))
-            for h in svc.search(query, top_k, doc_ids, tags, source,
+            for h in svc.search(query, top_k, doc_ids, tags,
                                 doc_type, since)]
 
 
@@ -160,10 +153,6 @@ def procure_list_documents(
     doc_type: Annotated[
         str | None,
         Field(description='Optional type filter: "memory" for cross-agent memories only, "document" for files/uploads only, omit for everything.'),
-    ] = None,
-    source: Annotated[
-        str | None,
-        Field(description="Optional source filter: upload, text, url, or watch."),
     ] = None,
     query: Annotated[
         str | None,
@@ -180,10 +169,10 @@ def procure_list_documents(
 ) -> list[LibraryDoc]:
     """List documents in the procure library with status and chunk counts. Use it to discover what is stored before searching, or to get document IDs for scoped search. Pass doc_type="memory" to browse only agent memories. Page large libraries with limit/offset. Each entry's `uri` reads the full document."""
     docs = [LibraryDoc(**d, uri=_doc_uri(d["doc_id"]))
-            for d in _svc().list_documents(doc_type, source, query,
+            for d in _svc().list_documents(doc_type, query,
                                            limit, offset)]
-    logger.info("procure_list_documents doc_type=%s source=%s query=%s limit=%d offset=%d -> %d docs",
-                doc_type, source, query, limit, offset, len(docs))
+    logger.info("procure_list_documents doc_type=%s query=%s limit=%d offset=%d -> %d docs",
+                doc_type, query, limit, offset, len(docs))
     return docs
 
 
@@ -209,25 +198,6 @@ def procure_add_text(
         **_svc().ingest_text(title.strip() or "snippet", text, tags or [],
                              doc_type))
     logger.info("procure_add_text -> %s", result)
-    return result
-
-
-@mcp.tool()
-def procure_add_url(
-    url: Annotated[str, Field(description="http(s) URL of an article or page to ingest.")],
-    tags: Annotated[
-        list[str] | None,
-        Field(description="Optional tags for later filtered search."),
-    ] = None,
-    doc_type: Annotated[
-        str,
-        Field(description='Document type: "memory" to store a cross-agent memory, "document" (default) for ordinary pages.'),
-    ] = "document",
-) -> IngestResult:
-    """Fetch a web page and add its readable text to the procure library. The article text is extracted, chunked, embedded, and searchable immediately. Use it to persist reference pages worth retrieving later."""
-    logger.info("procure_add_url url=%r doc_type=%s", url[:120], doc_type)
-    result = IngestResult(**_svc().ingest_url(url, tags or [], doc_type))
-    logger.info("procure_add_url -> %s", result)
     return result
 
 
@@ -272,7 +242,7 @@ def tool_descriptions() -> list[dict]:
     """Tool name + description for the workspace UI (single source)."""
     out = []
     for name in ("procure_search", "procure_list_documents",
-                 "procure_add_text", "procure_add_url",
+                 "procure_add_text",
                  "procure_update_text", "procure_delete_document"):
         fn = globals().get(name)
         if fn is None:

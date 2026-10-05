@@ -135,8 +135,8 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("uninstall-skills",
                    help="remove the procure agent skill from harness skill dirs")
 
-    a = sub.add_parser("add", help="ingest a file, URL, or stdin text")
-    a.add_argument("source", help="file path, http(s) URL, or - for stdin")
+    a = sub.add_parser("add", help="ingest a file or stdin text")
+    a.add_argument("source", help="file path, or - for stdin")
     a.add_argument("--tags", default="",
                    help="comma-separated tags")
     a.add_argument("--doc-type", default="document",
@@ -148,7 +148,6 @@ def _parser() -> argparse.ArgumentParser:
 
     li = sub.add_parser("list", help="list stored documents")
     li.add_argument("--doc-type", default=None)
-    li.add_argument("--source", default=None)
     li.add_argument("--query", default=None)
     li.add_argument("--limit", type=int, default=50)
     li.add_argument("--data-dir", default=None,
@@ -313,9 +312,7 @@ def cmd_add(args: argparse.Namespace) -> int:
         return 1
     tags = [t.strip() for t in (args.tags or "").split(",") if t.strip()]
     svc = _service_for(args)
-    if args.source.startswith(("http://", "https://")):
-        res = svc.ingest_url(args.source, tags, dtype)
-    elif args.source == "-":
+    if args.source == "-":
         text = sys.stdin.read()
         if not text.strip():
             print("error: no text on stdin")
@@ -340,7 +337,7 @@ def cmd_add(args: argparse.Namespace) -> int:
 def cmd_list(args: argparse.Namespace) -> int:
     svc = _service_for(args)
     try:
-        docs = svc.list_documents(args.doc_type, args.source, args.query,
+        docs = svc.list_documents(args.doc_type, args.query,
                                   args.limit, 0)
     except ValueError as e:
         print(f"error: {e}")
@@ -356,12 +353,12 @@ def cmd_search(args: argparse.Namespace) -> int:
     tags = [t.strip() for t in (args.tags or "").split(",") if t.strip()] or None
     try:
         hits = svc.search(args.query, args.top_k, None, tags,
-                          None, args.doc_type)
+                          args.doc_type)
     except ValueError as e:
         print(f"error: {e}")
         return 1
     for i, h in enumerate(hits, 1):
-        print(f"#{i} [{h['score']:.3f}|ans {h['answerability']:.2f}] "
+        print(f"#{i} [{h['score']:.3f}] "
               f"{h['filename']} ({h['chunk_id']})")
         print(f"    {h['text'][:280].replace(chr(10), ' ')}")
     return 0

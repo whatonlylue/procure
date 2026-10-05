@@ -1,4 +1,4 @@
-"""Background jobs: uploads, folder syncs, and URL/reingest work run here.
+"""Background jobs: uploads, imports, and reingest work run here.
 
 Jobs are in-memory (a server restart drops their history, never the
 library itself). Cancellation is cooperative: queued jobs cancel

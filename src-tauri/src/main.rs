@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! procure desktop shell.
 //!
-//! Owns the Python sidecar lifecycle: spawn `procure-sidecar serve` on a
+//! Owns the Python sidecar lifecycle: spawn `ProcureHelper serve` on a
 //! stable local port with the OS app-data dir, wait for its `PROCURE_URL=`
 //! announcement on stdout, open the main window on that URL, and kill the
 //! sidecar when the window closes. The UI itself is served by the sidecar,
@@ -126,7 +126,7 @@ fn spawn_sidecar(
     let port_arg = port.to_string();
     let (rx, child) = handle
         .shell()
-        .sidecar("procure-sidecar")
+        .sidecar("ProcureHelper")
         .map_err(|e| format!("sidecar lookup: {e}"))?
         .args([
             "serve",

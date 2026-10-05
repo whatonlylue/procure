@@ -20,7 +20,6 @@ from app.mcp_manager import get_mcp_manager
 from app.ocr import backend_name as ocr_backend
 from app.service import get_service
 from app.version import __version__
-from app.watch import get_watch_manager
 
 # Hosts the workspace server may serve. The UI is same-origin on one of
 # these; anything else is a DNS-rebinding read or a cross-site drive-by
@@ -83,14 +82,12 @@ def _have_module(name: str) -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logbuffer.install()
-    get_watch_manager().ensure_running()
     if get_settings().mcp_autostart:
         try:
             get_mcp_manager().start()
         except Exception:  # autostart is best-effort; the tab shows the error
             pass
     yield
-    get_watch_manager().stop()
     get_mcp_manager().stop()
     get_job_manager().shutdown()
 
@@ -122,12 +119,6 @@ class SettingsPatch(BaseModel):
     mcp_autostart: bool | None = None
 
 
-class UrlIngest(BaseModel):
-    url: str
-    tags: list[str] = []
-    doc_type: str = "document"
-
-
 class TagsPatch(BaseModel):
     tags: list[str] = []
 
@@ -135,11 +126,6 @@ class TagsPatch(BaseModel):
 class MetaPatch(BaseModel):
     filename: str | None = None
     doc_type: str | None = None
-
-
-class WatchAdd(BaseModel):
-    path: str
-    recursive: bool = True
 
 
 class SkillsInstall(BaseModel):
@@ -159,15 +145,15 @@ def health() -> dict:
         "documents": svc.meta.count(),
         "search": svc.settings.search_mode,
         "rerank": svc.settings.rerank,
-        # Cheap flags only: .available would LOAD the NLI model on first
+        # Cheap flags only: .available would LOAD the model on first
         # call, and the frontend polls health after every action.
         "rerank_backend": "neural" if neural else "heuristic",
         "rerank_models_loaded": {
             "cross_encoder": svc._cross.loaded,
-            "nli": svc._nli.loaded,
         },
         "mcp_autostart": svc.settings.mcp_autostart,
         "dense": svc.dimension_status(),
+        "embedding": svc.embedding_status(),
         "ocr": ocr_backend(),
         "formats": sorted(extract.SUPPORTED_EXTENSIONS),
     }
@@ -214,34 +200,17 @@ def upload(files: list[UploadFile] = File(...),
     return {"job": job}
 
 
-@app.post("/api/documents/url")
-def ingest_url(body: UrlIngest,
-               background: bool = Query(False, alias="async")) -> dict:
-    if not background:
-        try:
-            return get_service().ingest_url(body.url, body.tags, body.doc_type)
-        except ValueError as e:
-            raise HTTPException(400, str(e)) from e
-    svc = get_service()
-    job = get_job_manager().submit(
-        "url", body.url,
-        lambda h: [svc.ingest_url(body.url, body.tags, body.doc_type)],
-    )
-    return {"job": job}
-
-
 @app.get("/api/documents")
 def list_documents(doc_type: str | None = Query(None),
-                   source: str | None = Query(None),
                    q: str | None = Query(None),
                    limit: int | None = Query(None, ge=1, le=500),
                    offset: int = Query(0, ge=0),
                    sort: str = Query("newest")) -> dict:
     try:
         svc = get_service()
-        return {"documents": svc.list_documents(doc_type, source, q,
+        return {"documents": svc.list_documents(doc_type, q,
                                                 limit, offset, sort),
-                "total": svc.count_documents(doc_type, source, q)}
+                "total": svc.count_documents(doc_type, q)}
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
@@ -330,7 +299,10 @@ def reingest_document(doc_id: str,
     except KeyError:
         raise HTTPException(404, f"Unknown document {doc_id}") from None
     job = get_job_manager().submit(
-        "reingest", doc_id, lambda h: [svc.reingest_document(doc_id)])
+        "reingest", doc_id,
+        lambda h: [svc.reingest_document(
+            doc_id,
+            progress_frac=lambda frac, stage: h.update(frac, 1, stage))])
     return {"job": job}
 
 
@@ -368,48 +340,15 @@ def cancel_job(job_id: str) -> dict:
     return job
 
 
-@app.get("/api/watch")
-def list_watches() -> dict:
-    mgr = get_watch_manager()
-    return {"folders": mgr.list(), "last_scan": mgr.last_scan}
-
-
-@app.post("/api/watch")
-def add_watch(body: WatchAdd) -> dict:
-    try:
-        return get_watch_manager().add(body.path, body.recursive)
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from e
-
-
-@app.delete("/api/watch/{watch_id}")
-def remove_watch(watch_id: int,
-                 delete_docs: bool = Query(False)) -> dict:
-    if not get_watch_manager().remove(watch_id, delete_docs):
-        raise HTTPException(404, f"Unknown watch {watch_id}")
-    return {"removed": watch_id}
-
-
-@app.post("/api/watch/sync")
-def sync_watches() -> dict:
-    mgr = get_watch_manager()
-    job = get_job_manager().submit(
-        "watch-sync", "folder sync",
-        lambda h: mgr.sync_all(progress=h.update, cancelled=h.is_cancelled),
-    )
-    return {"job": job}
-
-
 @app.get("/api/search", response_model=SearchResponse)
 def search(q: str = Query(""), top_k: int = Query(_DEFAULT_TOPK, ge=1, le=50),
            doc_id: list[str] | None = Query(None),
            tag: list[str] | None = Query(None),
-           source: str | None = Query(None),
            doc_type: str | None = Query(None),
            since: str | None = Query(None)) -> dict:
     try:
         return {"query": q, "results": get_service().search(
-            q, top_k, doc_id, tag, source, doc_type, since)}
+            q, top_k, doc_id, tag, doc_type, since)}
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 

@@ -6,8 +6,6 @@ export interface Doc {
   error: string;
   created_at: string;
   tags: string[];
-  source: string;
-  source_uri: string;
   content_hash: string;
   doc_type: string;
 }
@@ -29,16 +27,6 @@ export interface Job {
   error: string;
 }
 
-export interface WatchFolder {
-  id: number;
-  path: string;
-  recursive: number;
-  created_at: string;
-  last_sync: string;
-  last_error: string;
-  file_count: number;
-}
-
 export interface Hit {
   chunk_id: string;
   doc_id: string;
@@ -49,8 +37,6 @@ export interface Hit {
   sparse_score?: number;
   dense_score?: number;
   fused_rank?: number;
-  answerability?: number;
-  entailment?: number;
 }
 
 export interface DenseStatus {
@@ -69,7 +55,7 @@ export interface Health {
   search: string;
   rerank: string;
   rerank_backend?: string;
-  rerank_models_loaded?: { cross_encoder: boolean; nli: boolean };
+  rerank_models_loaded?: { cross_encoder: boolean };
   mcp_autostart?: boolean;
   dense?: DenseStatus;
   ocr?: string;
@@ -121,7 +107,6 @@ export async function libraryVersion(): Promise<LibraryVersion> {
 
 export interface ListOpts {
   docType?: string;
-  source?: string;
   query?: string;
   limit?: number;
   offset?: number;
@@ -131,7 +116,6 @@ export interface ListOpts {
 export async function listDocs(opts?: ListOpts): Promise<DocList> {
   const p = new URLSearchParams();
   if (opts?.docType) p.set("doc_type", opts.docType);
-  if (opts?.source) p.set("source", opts.source);
   if (opts?.query) p.set("q", opts.query);
   if (opts?.limit !== undefined) p.set("limit", String(opts.limit));
   if (opts?.offset) p.set("offset", String(opts.offset));
@@ -163,7 +147,6 @@ export async function patchDoc(
 export interface SearchScope {
   docIds?: string[];
   tags?: string[];
-  source?: string;
   docType?: string;
   since?: string;
 }
@@ -172,7 +155,6 @@ export async function search(q: string, topK: number, scope?: SearchScope): Prom
   const p = new URLSearchParams({ q, top_k: String(topK) });
   for (const d of scope?.docIds ?? []) p.append("doc_id", d);
   for (const t of scope?.tags ?? []) p.append("tag", t);
-  if (scope?.source) p.set("source", scope.source);
   if (scope?.docType) p.set("doc_type", scope.docType);
   if (scope?.since) p.set("since", scope.since);
   return req<{ results: Hit[] }>(`/api/search?${p}`).then((j) => j.results);
@@ -191,13 +173,6 @@ export async function getJob(jobId: string): Promise<Job> {
 
 export async function cancelJob(jobId: string): Promise<Job> {
   return req<Job>(`/api/jobs/${jobId}`, { method: "DELETE" });
-}
-
-export async function addUrl(url: string, tags: string[], docType?: string): Promise<Doc> {
-  return req<Doc>(
-    "/api/documents/url",
-    json({ url, tags, doc_type: docType || "document" })
-  );
 }
 
 export async function exportLibrary(): Promise<Blob> {
@@ -222,26 +197,6 @@ export async function setDocTags(docId: string, tags: string[]): Promise<{ doc_i
 
 export async function listTags(): Promise<TagCount[]> {
   return req<{ tags: TagCount[] }>("/api/tags").then((j) => j.tags);
-}
-
-export async function listWatches(): Promise<{ folders: WatchFolder[]; last_scan: string | null }> {
-  return req("/api/watch");
-}
-
-export async function addWatch(path: string, recursive: boolean): Promise<WatchFolder> {
-  try {
-    return await req<WatchFolder>("/api/watch", json({ path, recursive }));
-  } catch (e) {
-    throw new Error(`${String(e)} — is it a directory on the server?`);
-  }
-}
-
-export async function removeWatch(id: number, deleteDocs = false): Promise<void> {
-  await req(`/api/watch/${id}${deleteDocs ? "?delete_docs=true" : ""}`, { method: "DELETE" });
-}
-
-export async function syncWatches(): Promise<Job> {
-  return req<{ job: Job }>("/api/watch/sync", { method: "POST" }).then((j) => j.job);
 }
 
 export interface SettingsState {

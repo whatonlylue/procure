@@ -5,13 +5,23 @@ Build (from the project root, after `npm run build` in frontend/):
 
     .venv/bin/pyinstaller procure-sidecar.spec
 
-Output: dist/procure-sidecar — copy to
-src-tauri/binaries/procure-sidecar-<target-triple> (see packaging script).
+Output: dist/ProcureHelper — copy to
+src-tauri/binaries/ProcureHelper-<target-triple> (see packaging script).
 
-The neural stack (torch, sentence-transformers, transformers) is
-deliberately excluded: the app runs fully offline on hash embeddings +
-BM25 + heuristic rerank, and every neural import in app/ degrades
-gracefully. This keeps the binary ~100MB instead of ~2GB.
+The output name is the user-visible process name: Activity Monitor /
+Task Manager show the sidecar (bootloader + payload child, plus two
+more when the MCP server re-invokes this same binary) as ProcureHelper
+alongside the Procure app shell, so compute-heavy Python work is
+attributable at a glance. The MCP server is not an independent binary
+(it re-invokes this one via the `mcp-server` subcommand), so it
+deliberately shares the ProcureHelper name rather than getting its own.
+
+Embeddings run on model2vec (potion-retrieval-32M, app/embeddings.py),
+so model2vec + huggingface_hub ship in the sidecar and the model
+(~120MB) downloads once into the HF cache on first ingest. The torch
+rerank stack (torch, sentence-transformers, transformers) stays excluded:
+every neural import in app/ degrades gracefully, which keeps torch's
+~2GB out of the binary.
 
 The benchmark harness (app.bench) is likewise excluded: it is source-only
 (still in git for `git clone` users, but not in wheels either), and
@@ -45,10 +55,8 @@ a = Analysis(
         "torch",
         "sentence_transformers",
         "transformers",
-        "huggingface_hub",
-        "tokenizers",
-        "safetensors",
-        "onnxruntime",
+        # NOTE: "safetensors" must NOT be excluded: model2vec loads
+        # model.safetensors at startup via a lazy persistence import.
         "sklearn",
         "scipy",
         "pandas",
@@ -72,7 +80,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="procure-sidecar",
+    name="ProcureHelper",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -13,6 +13,7 @@ import unittest
 from app import mcp_server
 from app.config import Settings
 from app.service import RAGService
+from stub_embedder import StubEmbedder
 
 TEXT = (
     "Procure keeps field notes about lighthouse maintenance. "
@@ -29,7 +30,7 @@ def _settings(tmp: str) -> Settings:
 class DocumentFetchTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.svc = RAGService(_settings(self.tmp.name))
+        self.svc = RAGService(_settings(self.tmp.name), embedder=StubEmbedder())
         res = self.svc.ingest_text("lighthouse.md", TEXT)
         self.assertEqual(res["status"], "ready")
         self.doc_id = res["doc_id"]
@@ -66,7 +67,7 @@ class DocumentFetchTest(unittest.TestCase):
 class SettingsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.svc = RAGService(_settings(self.tmp.name))
+        self.svc = RAGService(_settings(self.tmp.name), embedder=StubEmbedder())
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -86,11 +87,24 @@ class SettingsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.svc.update_settings(None, "sometimes")
 
+    def test_default_cross_encoder_is_ettin(self) -> None:
+        prev = os.environ.pop("PROCURE_CROSS_ENCODER", None)
+        try:
+            self.assertEqual(
+                Settings().cross_encoder_model,
+                "cross-encoder/ettin-reranker-17m-v1")
+        finally:
+            if prev is not None:
+                os.environ["PROCURE_CROSS_ENCODER"] = prev
+        # The service must wire the configured model into its scorer.
+        self.assertEqual(self.svc._cross.model_name,
+                         self.svc.settings.cross_encoder_model)
+
 
 class McpResourceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.svc = RAGService(_settings(self.tmp.name))
+        self.svc = RAGService(_settings(self.tmp.name), embedder=StubEmbedder())
         res = self.svc.ingest_text("memory: beacons", TEXT)
         self.doc_id = res["doc_id"]
         self._prev = mcp_server._service

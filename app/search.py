@@ -1,9 +1,8 @@
-"""Hybrid search: BM25 sparse store, RRF fusion, CLEAR-style answerability.
+"""Hybrid search: FTS5 sparse store, RRF fusion, cross-encoder reranking.
 
-Sparse scoring is dependency-free (stdlib + sqlite3). Neural rerank paths
-load lazily and offline-first; when a model is unavailable scoring falls
-back to the coverage heuristic. See arXiv:2609.03482 (CLEAR) for the
-``sigmoid(relevance) + alpha * entailment`` inference formula.
+Sparse scoring is dependency-free (stdlib + sqlite3 FTS5). The cross-encoder
+rerank path loads lazily and offline-first; when the model is unavailable
+scoring falls back to the coverage heuristic.
 """
 from __future__ import annotations
 
@@ -63,39 +62,63 @@ class SparseHit:
     score: float
 
 
-class SparseStore:
-    """Incremental BM25 stats over stored chunks (sqlite, zero extra deps).
+def _fts_phrase(term: str) -> str:
+    """One FTS5 MATCH phrase: double-quoted with embedded quotes doubled."""
+    return '"' + term.replace('"', '""') + '"'
 
-    Chunk term frequencies live in ``postings``; document frequency is derived
-    per query term, so ingest/delete/reingest stay incremental with no global
-    rebuild.
+
+def _fts_match(terms: list[str]) -> str:
+    """OR of FTS5 phrases (callers pass ``content_terms`` output).
+
+    Terms come from :func:`tokenize` (``[a-z0-9]+``), so they carry no FTS5
+    syntax of their own; quoting still guards the general case.
+    """
+    return " OR ".join(_fts_phrase(t) for t in terms)
+
+
+class SparseStore:
+    """BM25 sparse retrieval backed by SQLite FTS5 (stdlib sqlite3, no deps).
+
+    One FTS5 table holds ``(chunk_id, doc_id, text)``; ranking uses the
+    built-in ``bm25()`` auxiliary (negated to a positive score, larger is
+    better). Ingest/delete/reingest stay incremental with no global rebuild.
+
+    Databases written by the previous hand-rolled ``chunks``/``postings``
+    schema are migrated once on open (rows copied into FTS5, old tables
+    dropped); the vector store can additionally backfill an empty sparse
+    store (see ``RAGService._backfill_sparse``).
     """
 
-    K1 = 1.5
-    B = 0.75
+    _TABLE = "chunks_fts"
 
     def __init__(self, path: str):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         self.path = path
         with self._session() as c:
             c.execute(
-                """CREATE TABLE IF NOT EXISTS chunks (
-                    chunk_id TEXT PRIMARY KEY,
-                    doc_id TEXT NOT NULL,
-                    text TEXT NOT NULL,
-                    length INTEGER NOT NULL DEFAULT 0
-                )"""
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS {self._TABLE} USING fts5("
+                "chunk_id UNINDEXED, doc_id UNINDEXED, text, "
+                "tokenize='unicode61 remove_diacritics 2')"
             )
+            self._migrate_legacy(c)
+
+    def _migrate_legacy(self, c: sqlite3.Connection) -> None:
+        """Copy hand-rolled ``chunks``/``postings`` rows into FTS5, then drop."""
+        tables = {r[0] for r in c.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+        ).fetchall()}
+        if "chunks" not in tables:
+            return
+        count = int(c.execute(f"SELECT COUNT(*) FROM {self._TABLE}").fetchone()[0])
+        if count == 0:
             c.execute(
-                """CREATE TABLE IF NOT EXISTS postings (
-                    chunk_id TEXT NOT NULL,
-                    term TEXT NOT NULL,
-                    tf INTEGER NOT NULL,
-                    PRIMARY KEY (chunk_id, term)
-                )"""
+                f"INSERT INTO {self._TABLE} (chunk_id, doc_id, text) "
+                "SELECT chunk_id, doc_id, text FROM chunks"
             )
-            c.execute("CREATE INDEX IF NOT EXISTS idx_post_term ON postings(term)")
-            c.execute("CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id)")
+        c.execute("DROP TABLE IF EXISTS postings")
+        c.execute("DROP TABLE IF EXISTS chunks")
+        c.execute("DROP INDEX IF EXISTS idx_post_term")
+        c.execute("DROP INDEX IF EXISTS idx_chunks_doc")
 
     def _connect(self) -> sqlite3.Connection:
         c = sqlite3.connect(self.path, timeout=10.0)
@@ -116,121 +139,80 @@ class SparseStore:
     def upsert_chunks(self, ids: list[str], doc_ids: list[str], texts: list[str]) -> None:
         with self._session() as c:
             for cid, did, text in zip(ids, doc_ids, texts):
-                toks = tokenize(text)
-                c.execute("DELETE FROM postings WHERE chunk_id=?", (cid,))
+                c.execute(f"DELETE FROM {self._TABLE} WHERE chunk_id=?", (cid,))
                 c.execute(
-                    """INSERT INTO chunks (chunk_id, doc_id, text, length)
-                       VALUES (?, ?, ?, ?)
-                       ON CONFLICT(chunk_id) DO UPDATE SET
-                         doc_id=excluded.doc_id, text=excluded.text,
-                         length=excluded.length""",
-                    (cid, did, text, len(toks)),
-                )
-                tf: dict[str, int] = {}
-                for t in toks:
-                    tf[t] = tf.get(t, 0) + 1
-                c.executemany(
-                    "INSERT INTO postings (chunk_id, term, tf) VALUES (?, ?, ?)",
-                    [(cid, t, n) for t, n in tf.items()],
+                    f"INSERT INTO {self._TABLE} (chunk_id, doc_id, text)"
+                    " VALUES (?, ?, ?)",
+                    (cid, did, text),
                 )
 
     def delete_by_doc(self, doc_id: str) -> int:
         with self._session() as c:
-            ids = [r[0] for r in c.execute(
-                "SELECT chunk_id FROM chunks WHERE doc_id=?", (doc_id,)).fetchall()]
-            for batch in _batched(ids):
-                ph = ",".join("?" for _ in batch)
-                c.execute(f"DELETE FROM postings WHERE chunk_id IN ({ph})", batch)
-            c.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
-        return len(ids)
+            cur = c.execute(f"DELETE FROM {self._TABLE} WHERE doc_id=?", (doc_id,))
+            return int(cur.rowcount or 0)
 
     def count(self) -> int:
         with self._session() as c:
-            return int(c.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
-
-    def _corpus_stats(self, c: sqlite3.Connection) -> tuple[int, float]:
-        row = c.execute("SELECT COUNT(*), AVG(length) FROM chunks").fetchone()
-        return int(row[0] or 0), float(row[1] or 0.0)
-
-    @staticmethod
-    def _idf_for(c: sqlite3.Connection, terms: list[str], n: int) -> dict[str, float]:
-        """IDF per term: ln(1 + (N - df + 0.5) / (df + 0.5)).
-
-        (chunk_id, term) is the PK, so COUNT(*) per term already counts
-        distinct chunks — no DISTINCT needed.
-        """
-        df = {t: 0 for t in terms}
-        for batch in _batched(terms):
-            ph = ",".join("?" for _ in batch)
-            for term, cnt in c.execute(
-                f"SELECT term, COUNT(*) FROM postings "
-                f"WHERE term IN ({ph}) GROUP BY term", batch,
-            ).fetchall():
-                df[term] = int(cnt)
-        return {t: math.log(1.0 + (n - d + 0.5) / (d + 0.5)) for t, d in df.items()}
+            return int(c.execute(f"SELECT COUNT(*) FROM {self._TABLE}").fetchone()[0])
 
     def idf_map(self, terms: list[str]) -> dict[str, float]:
-        """IDF per term under current stats: ln(1 + (N - df + 0.5) / (df + 0.5))."""
+        """IDF per term: ln(1 + (N - df + 0.5) / (df + 0.5)).
+
+        Document frequency is counted through FTS5 MATCH, so it agrees with
+        the retrieval index; the formula matches the previous hand-rolled
+        store (used by the coverage fallback in ``RAGService.search``).
+        """
         terms = list(dict.fromkeys(terms))
         if not terms:
             return {}
         with self._session() as c:
-            n, _ = self._corpus_stats(c)
+            n = int(c.execute(f"SELECT COUNT(*) FROM {self._TABLE}").fetchone()[0])
             if n == 0:
                 return {}
-            return self._idf_for(c, terms, n)
+            df = {
+                t: int(c.execute(
+                    f"SELECT COUNT(*) FROM {self._TABLE} "
+                    f"WHERE {self._TABLE} MATCH ?", (_fts_phrase(t),),
+                ).fetchone()[0])
+                for t in terms
+            }
+        return {t: math.log(1.0 + (n - d + 0.5) / (d + 0.5)) for t, d in df.items()}
 
     def search(self, query: str, top_n: int,
                doc_ids: list[str] | None = None) -> list[SparseHit]:
         terms = content_terms(query)
         if not terms:
             return []
+        match = _fts_match(terms)
         with self._session() as c:
-            n, avgdl = self._corpus_stats(c)
-            if n == 0 or avgdl <= 0:
-                return []
-            idf = self._idf_for(c, terms, n)
-            # Phase 1: score from postings + lengths only (no chunk text --
-            # common terms would otherwise pull most of the corpus per query).
-            scores: dict[str, float] = {}
-            doc_of: dict[str, str] = {}
+            # bm25() ranks best-first with ORDER BY ascending (most negative
+            # first); scores are negated so larger SparseHit.score is better.
+            scored: dict[str, tuple[str, str, float]] = {}
             scopes = [None] if not doc_ids else list(_batched(list(doc_ids)))
             for scope in scopes:
                 if scope is None:
-                    ph = ",".join("?" for _ in terms)
                     rows = c.execute(
-                        f"SELECT p.chunk_id, p.term, p.tf, ch.doc_id, ch.length "
-                        f"FROM postings p JOIN chunks ch ON ch.chunk_id = p.chunk_id "
-                        f"WHERE p.term IN ({ph})",
-                        terms,
+                        f"SELECT chunk_id, doc_id, text, bm25({self._TABLE}) AS r "
+                        f"FROM {self._TABLE} WHERE {self._TABLE} MATCH ? "
+                        "ORDER BY r",
+                        (match,),
                     ).fetchall()
                 else:
-                    ph = ",".join("?" for _ in terms)
                     dph = ",".join("?" for _ in scope)
                     rows = c.execute(
-                        f"SELECT p.chunk_id, p.term, p.tf, ch.doc_id, ch.length "
-                        f"FROM postings p JOIN chunks ch ON ch.chunk_id = p.chunk_id "
-                        f"WHERE p.term IN ({ph}) AND ch.doc_id IN ({dph})",
-                        terms + list(scope),
+                        f"SELECT chunk_id, doc_id, text, bm25({self._TABLE}) AS r "
+                        f"FROM {self._TABLE} WHERE {self._TABLE} MATCH ? "
+                        f"AND doc_id IN ({dph}) ORDER BY r",
+                        [match, *scope],
                     ).fetchall()
-                for cid, term, tf, did, length in rows:
-                    norm = self.K1 * (1.0 - self.B + self.B * (length / avgdl))
-                    scores[cid] = (scores.get(cid, 0.0)
-                                   + idf[term] * (tf * (self.K1 + 1.0)) / (tf + norm))
-                    doc_of[cid] = did
-            ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
-            if not ranked:
-                return []
-            # Phase 2: fetch text for the winners only.
-            texts: dict[str, str] = {}
-            for batch in _batched([cid for cid, _ in ranked]):
-                ph = ",".join("?" for _ in batch)
-                for cid, text in c.execute(
-                        f"SELECT chunk_id, text FROM chunks WHERE chunk_id IN ({ph})",
-                        batch).fetchall():
-                    texts[cid] = text
-        return [SparseHit(cid, doc_of[cid], texts.get(cid, ""), s)
-                for cid, s in ranked]
+                for cid, did, text, rank in rows:
+                    score = -float(rank)
+                    if cid not in scored or score > scored[cid][2]:
+                        scored[cid] = (did, text, score)
+            ranked = sorted(scored.items(), key=lambda kv: kv[1][2],
+                            reverse=True)[:top_n]
+        return [SparseHit(cid, did, text, score)
+                for cid, (did, text, score) in ranked]
 
 
 def rrf_fuse(ranked_lists: list[list[str]], k: int = RRF_K) -> dict[str, float]:
@@ -349,115 +331,9 @@ class CrossEncoderScorer:
         return [float(x) for x in out]
 
 
-class NLIEntailmentScorer:
-    """Frozen NLI teacher for answerability (CLEAR-style, inference only).
-
-    Scores P(entailment) with premise=chunk, hypothesis=query using a
-    DeBERTa-v3 NLI model — same family and task mixture (MNLI/FEVER/ANLI)
-    as CLEAR's frozen DeBERTa-v3-large teacher. Loaded lazily and
-    offline-first, mirroring :class:`CrossEncoderScorer`: returns None when
-    the model is not cached and downloads are disallowed.
-
-    Design caveat: the raw user query (often a question, not a declarative
-    hypothesis) is the NLI hypothesis, so P(entail) for "what is X?" is
-    semantically approximate — useful as a ranking signal, not a verdict.
-    """
-
-    def __init__(self, model_name: str = "", allow_download: bool = False):
-        self.model_name = (model_name or "").strip()
-        self.allow_download = allow_download
-        self._tok = None
-        self._model = None
-        self._entail_idx = 0
-        self._tried = False
-        self._lock = threading.Lock()
-
-    @property
-    def available(self) -> bool:
-        return self._load() is not None
-
-    @property
-    def loaded(self) -> bool:
-        """True once a model is in memory (never triggers a load)."""
-        with self._lock:
-            return self._model is not None
-
-    def _load(self):
-        with self._lock:
-            if self._tried:
-                return self._model
-            with _hf_offline(self.allow_download):
-                try:
-                    if not self.model_name:
-                        return None
-                    try:
-                        from transformers import (AutoModelForSequenceClassification,
-                                                  AutoTokenizer)
-                    except ImportError:
-                        return None
-                    try:
-                        self._tok = AutoTokenizer.from_pretrained(self.model_name)
-                        self._model = AutoModelForSequenceClassification.from_pretrained(
-                            self.model_name)
-                    except Exception:
-                        self._tok = None
-                        self._model = None
-                        return None
-                    try:
-                        labels = {str(k).lower(): int(v)
-                                  for k, v in self._model.config.label2id.items()}
-                        self._entail_idx = labels.get("entailment", 0)
-                    except Exception:
-                        self._entail_idx = 0
-                finally:
-                    self._tried = True
-            return self._model
-
-    def score(self, query: str, texts: list[str]) -> list[float] | None:
-        """P(entailment | chunk, query) per chunk, or None when unavailable."""
-        model = self._load()
-        if model is None or self._tok is None or not texts:
-            return None
-        try:
-            import torch
-            import torch.nn.functional as F
-        except ImportError:
-            return None
-        try:
-            out: list[float] = []
-            with torch.no_grad():
-                for i in range(0, len(texts), 8):
-                    batch = texts[i:i + 8]
-                    enc = self._tok(
-                        batch, [query] * len(batch),
-                        padding=True, truncation=True, max_length=512,
-                        return_tensors="pt",
-                    )
-                    logits = model(**enc).logits
-                    probs = F.softmax(logits, dim=-1)[:, self._entail_idx]
-                    out.extend(float(p) for p in probs.tolist())
-        except Exception:
-            return None
-        return out
-
-
 def sigmoid(xs: list[float]) -> list[float]:
     # Clamp: math.exp overflows for x < -709.
     return [1.0 / (1.0 + math.exp(-max(-500.0, min(500.0, x)))) for x in xs]
-
-
-def clear_answerability(rel: list[float], entail: list[float],
-                        alpha: float = 0.5) -> list[float]:
-    """CLEAR inference combination, normalized to [0, 1].
-
-    ``(sigmoid(relevance) + alpha * entailment) / (1 + alpha)``: the paper's
-    blend rescaled so the neural and heuristic paths share one scale (the
-    raw blend runs to 1 + alpha, which also leaked >100% into the UI).
-    Rescaling is monotonic, so rankings are unchanged. Both inputs align
-    by position.
-    """
-    scale = 1.0 + max(0.0, alpha)
-    return [(r + alpha * e) / scale for r, e in zip(sigmoid(rel), entail)]
 
 
 def combine_answerability(cross: list[float] | None,

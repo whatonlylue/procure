@@ -5,19 +5,16 @@ import hashlib
 import logging
 import os
 import threading
-import urllib.parse
 import uuid
 from collections.abc import Callable
 from functools import lru_cache
 
 from app import chunking, extract
 from app.config import Settings, get_settings
-from app.embeddings.local_hash import HashEmbedder
+from app.embeddings import Model2VecEmbedder
 from app.search import (
     CrossEncoderScorer,
-    NLIEntailmentScorer,
     SparseStore,
-    clear_answerability,
     combine_answerability,
     content_terms,
     coverage_score,
@@ -36,7 +33,7 @@ _RETRIEVE_MULT = 5
 _RETRIEVE_MIN = 25
 _RERANK_MULT = 3
 _RERANK_MIN = 15
-# Final blend: normalized fused retrieval score vs answerability.
+# Final blend: normalized fused retrieval score vs rerank signal.
 _W_FUSED = 0.5
 _W_ANSWER = 0.5
 
@@ -44,6 +41,20 @@ _TEXT_EXTENSIONS = (".txt", ".md", ".markdown")
 
 ProgressCb = Callable[[int, int, str], None]
 CancelCb = Callable[[], bool]
+#: Intra-document progress: frac in [0, 1) positions the current file's
+#: slot, so a single large document still moves the status bar while it
+#: is being extracted/embedded (previously only file boundaries
+#: reported, and the bar hung at 0% until the file finished).
+StageCb = Callable[[float, str], None]
+
+
+def _file_stage(progress: ProgressCb, index: int, total: int,
+                filename: str) -> StageCb:
+    """Map a file's 0..1 stage fraction onto the overall done count."""
+    def _stage(frac: float, stage: str) -> None:
+        clamped = min(max(frac, 0.0), 0.99)
+        progress(round(index + clamped, 3), total, stage or filename)
+    return _stage
 
 
 def content_hash(data: bytes) -> str:
@@ -56,23 +67,28 @@ def _safe_filename(name: str, default: str = "file") -> str:
 
 
 class RAGService:
-    def __init__(self, settings: Settings | None = None):
+    def __init__(self, settings: Settings | None = None,
+                 embedder=None):
         self.settings = settings or get_settings()
         os.makedirs(self.settings.raw_dir, exist_ok=True)
         self.meta = MetaStore(self.settings.meta_db)
-        self.embedder = HashEmbedder(self.settings.hash_dim)
+        if embedder is not None:
+            self.embedder = embedder
+        else:
+            s = self.settings
+            self.embedder = Model2VecEmbedder(
+                model=s.embedding_model,
+                model_dir=s.embedding_dir or None,
+                batch_size=s.embedding_batch,
+                max_length=s.embedding_max_length)
         self.vectors = SqliteVectorStore(self.settings.vec_db)
         self.sparse = SparseStore(self.settings.sparse_db)
         self._cross = CrossEncoderScorer(
             self.settings.cross_encoder_model,
             self.settings.cross_encoder_download,
         )
-        self._nli = NLIEntailmentScorer(
-            self.settings.nli_model,
-            self.settings.nli_download,
-        )
         # Serializes check-then-insert ingest within this process (job
-        # workers + watch loop race otherwise). Cross-process (workspace +
+        # workers race otherwise). Cross-process (workspace +
         # MCP subprocess) races can still double-ingest; production callers
         # should dedup by content hash on read.
         self._ingest_lock = threading.RLock()
@@ -93,23 +109,25 @@ class RAGService:
 
     # -- ingest ---------------------------------------------------------
     def ingest_files(self, files: list[tuple[str, bytes]],
-                     source: str = "upload", source_uri: str = "",
                      tags: list[str] | None = None,
                      doc_type: str = "document",
                      progress: ProgressCb | None = None,
                      cancelled: CancelCb | None = None) -> list[dict]:
         dtype = normalize_doc_type(doc_type)
         out = []
+        total = len(files)
         for i, (filename, data) in enumerate(files):
             if cancelled is not None and cancelled():
                 out.append({"filename": filename, "status": "cancelled"})
                 continue
             if progress is not None:
-                progress(i, len(files), filename)
-            out.append(self._ingest_one(filename, data, source, source_uri,
-                                        tags, dtype))
+                progress(i, total, filename)
+            stage_cb = (None if progress is None else
+                        _file_stage(progress, i, total, filename))
+            out.append(self._ingest_one(filename, data, tags, dtype,
+                                        progress_frac=stage_cb))
         if progress is not None:
-            progress(len(files), len(files), "")
+            progress(total, total, "")
         return out
 
     def _duplicate_result(self, dup: dict, tags: list[str] | None) -> dict:
@@ -127,9 +145,10 @@ class RAGService:
         return {"doc_id": doc_id, "filename": filename, "status": "failed",
                 "error": error, "doc_type": doc_type}
 
-    def _ingest_one(self, filename: str, data: bytes, source: str = "upload",
-                    source_uri: str = "", tags: list[str] | None = None,
-                    doc_type: str = "document") -> dict:
+    def _ingest_one(self, filename: str, data: bytes,
+                    tags: list[str] | None = None,
+                    doc_type: str = "document",
+                    progress_frac: StageCb | None = None) -> dict:
         dtype = normalize_doc_type(doc_type)
         with self._ingest_lock:
             digest = content_hash(data)
@@ -146,10 +165,15 @@ class RAGService:
                 with open(raw_path, "wb") as f:
                     f.write(data)
                 self.meta.set_raw_path(doc_id, raw_path)
+                if progress_frac is not None:
+                    progress_frac(0.05, f"extracting {filename}")
                 text = extract.extract_text(
                     raw_path, filename, ocr_mode=self.settings.ocr_mode)
+                if progress_frac is not None:
+                    progress_frac(0.2, f"chunking {filename}")
                 return self._commit_text(doc_id, filename, text, digest,
-                                         source, source_uri, tags, dtype)
+                                         tags, dtype,
+                                         progress_frac=progress_frac)
             except Exception as e:  # per-file failure must not break batch
                 self.meta.update_status(doc_id, "failed", str(e), 0)
                 return self._failed(doc_id, filename, str(e), dtype)
@@ -157,7 +181,7 @@ class RAGService:
     def ingest_text(self, filename: str, text: str,
                     tags: list[str] | None = None,
                     doc_type: str = "document",
-                    source: str = "text", source_uri: str = "") -> dict:
+                    progress_frac: StageCb | None = None) -> dict:
         """Ingest raw text (agent transcripts, tool outputs, notes) as a document.
 
         Same chunk + embed + store pipeline as file upload; the text is also
@@ -183,116 +207,22 @@ class RAGService:
                 with open(raw_path, "w", encoding="utf-8") as f:
                     f.write(text or "")
                 self.meta.set_raw_path(doc_id, raw_path)
+                if progress_frac is not None:
+                    progress_frac(0.2, f"chunking {filename}")
                 return self._commit_text(doc_id, filename, text, digest,
-                                         source, source_uri, tags, dtype)
+                                         tags, dtype,
+                                         progress_frac=progress_frac)
             except Exception as e:  # surface as failed status
                 self.meta.update_status(doc_id, "failed", str(e), 0)
                 return self._failed(doc_id, filename, str(e), dtype)
-
-    def _failed_url_result(self, url: str, err: str, dtype: str) -> dict:
-        """Failed-URL record, reusing the existing failed doc for this URL.
-
-        Every bad fetch used to mint a fresh persistent "failed" document,
-        so one bad URL (or an agent retry loop) cluttered the library
-        without bound. The failure stays visible; it just stops multiplying.
-        """
-        with self._ingest_lock:
-            existing = self.meta.get_by_source_uri(url, status="failed")
-            if existing is not None:
-                self.meta.update_status(existing["doc_id"], "failed", err, 0)
-                return self._failed(existing["doc_id"], existing["filename"],
-                                    err, dtype)
-            doc_id = uuid.uuid4().hex[:12]
-            self.meta.upsert(doc_id, url or "url", "failed", 0, err,
-                             source="url", source_uri=url, doc_type=dtype)
-            return self._failed(doc_id, url, err, dtype)
-
-    def ingest_url(self, url: str, tags: list[str] | None = None,
-                   doc_type: str = "document") -> dict:
-        """Fetch a URL, extract its article text, and ingest it as a document."""
-        from app.webfetch import fetch_url_text
-
-        dtype = normalize_doc_type(doc_type)
-        url = (url or "").strip()
-        try:
-            title, text = fetch_url_text(url, timeout=self.settings.fetch_timeout)
-        except Exception as e:  # fetch failure is a failed doc
-            return self._failed_url_result(url, str(e), dtype)
-        if not text.strip():
-            return self._failed_url_result(
-                url, "No readable text found on that page", dtype)
-        with self._ingest_lock:
-            digest = content_hash(text.encode("utf-8"))
-            dup = self.meta.get_by_hash(digest, dtype)
-            if dup is not None:
-                return self._duplicate_result(dup, tags)
-            parts = urllib.parse.urlparse(url)
-            slug = _safe_filename(title or parts.netloc, "page")[:80] or "page"
-            filename = f"{slug}.md"
-            doc_id = uuid.uuid4().hex[:12]
-            raw_path = os.path.join(self.settings.raw_dir, f"{doc_id}_{slug}.md")
-            self.meta.upsert(doc_id, filename, "processing",
-                             source="url", source_uri=url, doc_type=dtype)
-            try:
-                with open(raw_path, "w", encoding="utf-8") as f:
-                    f.write(f"# {title}\n\nSource: {url}\n\n{text}")
-                self.meta.set_raw_path(doc_id, raw_path)
-                return self._commit_text(doc_id, filename, text, digest,
-                                         "url", url, tags, dtype)
-            except Exception as e:  # surface as failed status
-                self.meta.update_status(doc_id, "failed", str(e), 0)
-                return self._failed(doc_id, filename, str(e), dtype)
-
-    def ingest_path(self, path: str, source: str = "watch",
-                    source_uri: str = "",
-                    doc_type: str = "document") -> dict:
-        """Ingest a file from disk (folder-watch sync)."""
-        with open(path, "rb") as f:
-            data = f.read()
-        return self._ingest_one(os.path.basename(path), data,
-                                source, source_uri or path,
-                                None, doc_type)
-
-    def update_document_content(self, doc_id: str, data: bytes,
-                                filename: str | None = None) -> dict:
-        """Re-ingest new bytes into an existing doc id (watch updates).
-
-        Preserves tags and doc_type; refreshes chunks, hash, and raw copy.
-        """
-        doc = self.meta.get(doc_id)
-        if not doc:
-            raise KeyError(doc_id)
-        name = filename or doc["filename"]
-        dtype = doc.get("doc_type") or "document"
-        safe = _safe_filename(name)
-        raw_path = os.path.join(self.settings.raw_dir, f"{doc_id}_{safe}")
-        for old in os.listdir(self.settings.raw_dir):
-            if old.startswith(doc_id + "_") and old != os.path.basename(raw_path):
-                try:
-                    os.remove(os.path.join(self.settings.raw_dir, old))
-                except OSError:
-                    pass
-        with open(raw_path, "wb") as f:
-            f.write(data)
-        self.meta.set_raw_path(doc_id, raw_path)
-        try:
-            text = extract.extract_text(
-                raw_path, name, ocr_mode=self.settings.ocr_mode)
-            return self._commit_text(doc_id, name, text, content_hash(data),
-                                     doc.get("source") or "upload",
-                                     doc.get("source_uri") or "",
-                                     self.meta.get_tags(doc_id), dtype)
-        except Exception as e:  # surface as failed status
-            self.meta.update_status(doc_id, "failed", str(e), 0)
-            return self._failed(doc_id, name, str(e), dtype)
 
     def update_document_text(self, doc_id: str, text: str,
                              filename: str | None = None,
                              tags: list[str] | None = None) -> dict:
         """Replace a text document's content in place (memory lifecycle).
 
-        Re-chunks and re-embeds; preserves doc_type/source unless the
-        caller passes a new filename/tags. Raises KeyError when unknown.
+        Re-chunks and re-embeds; preserves doc_type unless the caller
+        passes a new filename/tags. Raises KeyError when unknown.
         """
         doc = self.meta.get(doc_id)
         if not doc:
@@ -317,7 +247,6 @@ class RAGService:
         try:
             return self._commit_text(
                 doc_id, name, text, content_hash((text or "").encode("utf-8")),
-                doc.get("source") or "upload", doc.get("source_uri") or "",
                 self.meta.get_tags(doc_id) if tags is None else tags, dtype)
         except Exception as e:  # surface as failed status
             self.meta.update_status(doc_id, "failed", str(e), 0)
@@ -336,26 +265,39 @@ class RAGService:
         return {**updated, "tags": self.meta.get_tags(doc_id)}
 
     def _commit_text(self, doc_id: str, filename: str, text: str,
-                     digest: str = "", source: str = "upload",
-                     source_uri: str = "",
+                     digest: str = "",
                      tags: list[str] | None = None,
-                     doc_type: str = "document") -> dict:
+                     doc_type: str = "document",
+                     progress_frac: StageCb | None = None) -> dict:
         dtype = normalize_doc_type(doc_type)
         chunks = chunking.split_text(
             text, self.settings.chunk_size, self.settings.chunk_overlap
         )
         if not chunks:
             raise ValueError("No text extracted")
-        embs = self.embedder.embed(chunks)
+        # Embed in caller-visible batches: one monolithic embed() call is
+        # the longest phase for big documents, and without per-batch
+        # updates the status bar hangs until the whole file is done.
+        batch = max(1, int(getattr(self.embedder, "batch_size", 32) or 32))
+        embs: list[list[float]] = []
+        for start in range(0, len(chunks), batch):
+            embs.extend(self.embedder.embed(chunks[start:start + batch]))
+            if progress_frac is not None:
+                done = min(start + batch, len(chunks))
+                frac = 0.2 + 0.65 * done / len(chunks)
+                progress_frac(frac, f"embedding {filename} ({done}/{len(chunks)})")
+        if progress_frac is not None:
+            progress_frac(0.9, f"storing {filename}")
         ids = [f"{doc_id}:{i}" for i in range(len(chunks))]
         # Delete first: without this, shrinking content leaves stale chunks
         # ({doc_id}:n..) behind in both stores, still served by search.
         self.vectors.delete_by_doc(doc_id)
         self.sparse.delete_by_doc(doc_id)
-        self.vectors.upsert(ids, [doc_id] * len(chunks), embs, chunks)
+        self.vectors.upsert(ids, [doc_id] * len(chunks), embs, chunks,
+                              backend=self._current_backend())
         self.sparse.upsert_chunks(ids, [doc_id] * len(chunks), chunks)
         self.meta.upsert(doc_id, filename, "ready", len(chunks), "",
-                         digest, source, source_uri, dtype)
+                         digest, dtype)
         applied = self.meta.set_tags(doc_id, tags or [])
         self._write_text_cache(doc_id, text)
         return {"doc_id": doc_id, "filename": filename, "status": "ready",
@@ -382,16 +324,14 @@ class RAGService:
 
     # -- library --------------------------------------------------------
     def list_documents(self, doc_type: str | None = None,
-                       source: str | None = None,
                        query: str | None = None,
                        limit: int | None = None, offset: int = 0,
                        sort: str = "newest") -> list[dict]:
-        return self.meta.list(doc_type, source, query, limit, offset, sort)
+        return self.meta.list(doc_type, query, limit, offset, sort)
 
     def count_documents(self, doc_type: str | None = None,
-                        source: str | None = None,
                         query: str | None = None) -> int:
-        return self.meta.count_matching(doc_type, source, query)
+        return self.meta.count_matching(doc_type, query)
 
     def library_version(self) -> dict:
         """Cheap revision fingerprint; never touches the vector stores."""
@@ -418,28 +358,12 @@ class RAGService:
                         ocr_mode=self.settings.ocr_mode)
                 except Exception:  # fall back to stored chunks
                     text = ""
-            if text and doc.get("source") == "url":
-                text = self._strip_url_header(text, doc)
             if text:
                 self._write_text_cache(doc_id, text)
         if not text:
             rows = self.vectors.get_by_doc(doc_id)
             text = "\n\n".join(t for _, t in rows if t)
         return {**doc, "tags": self.meta.get_tags(doc_id), "text": text}
-
-    @staticmethod
-    def _strip_url_header(text: str, doc: dict) -> str:
-        """Drop the "# title / Source: url" header from legacy URL raws.
-
-        The raw copy of a URL doc starts with a 3-line header that was
-        never part of the indexed text; cached/indexed reads exclude it.
-        """
-        lines = text.split("\n")
-        uri = doc.get("source_uri") or ""
-        if (len(lines) >= 3 and lines[0].startswith("# ")
-                and lines[1] == f"Source: {uri}"):
-            return "\n".join(lines[3:]).lstrip("\n")
-        return text
 
     def _raw_path(self, doc_id: str) -> str | None:
         doc = self.meta.get(doc_id)
@@ -525,10 +449,8 @@ class RAGService:
         self.meta.delete(doc_id)
         return True
 
-    def mark_missing(self, doc_id: str, missing: bool) -> None:
-        self.meta.mark_missing(doc_id, missing)
-
-    def reingest_document(self, doc_id: str) -> dict:
+    def reingest_document(self, doc_id: str,
+                           progress_frac: StageCb | None = None) -> dict:
         doc = self.meta.get(doc_id)
         if not doc:
             raise KeyError(doc_id)
@@ -538,14 +460,18 @@ class RAGService:
             raise FileNotFoundError(f"Raw file for {doc_id} is gone; re-upload it")
         self.meta.update_status(doc_id, "processing", "")
         try:
+            if progress_frac is not None:
+                progress_frac(0.05, f"extracting {doc['filename']}")
             text = extract.extract_text(
                 raw_path, doc["filename"], ocr_mode=self.settings.ocr_mode)
             with open(raw_path, "rb") as f:
                 digest = content_hash(f.read())
+            if progress_frac is not None:
+                progress_frac(0.2, f"chunking {doc['filename']}")
             return self._commit_text(
                 doc_id, doc["filename"], text, digest,
-                doc.get("source") or "upload", doc.get("source_uri") or "",
-                self.meta.get_tags(doc_id), dtype)
+                self.meta.get_tags(doc_id), dtype,
+                progress_frac=progress_frac)
         except Exception as e:  # surface as failed status
             self.meta.update_status(doc_id, "failed", str(e), 0)
             return self._failed(doc_id, doc["filename"], str(e), dtype)
@@ -559,27 +485,59 @@ class RAGService:
                 return None
         return self._embed_dim_cached
 
-    def dimension_status(self) -> dict:
-        """Compare stored vector dims with the active embedder.
+    def _current_backend(self):
+        return getattr(self.embedder, "backend", None)
 
-        Changing PROCURE_HASH_DIM leaves old vectors behind; dense
-        search skips them, so report it instead of failing silently.
+    def embedding_status(self) -> dict:
+        """Cheap embedding-backend status for /api/health.
+
+        Never downloads the model or runs inference; loaded is False
+        until the first embed call.
+        """
+        info = getattr(self.embedder, "info", None)
+        if callable(info):
+            try:
+                return dict(info())
+            except Exception:
+                pass
+        return {"backend": self._current_backend(),
+                "dim": self._current_dim(),
+                "device": "cpu",
+                "loaded": False}
+
+    def dimension_status(self) -> dict:
+        """Compare stored vectors with the active embedding backend.
+
+        Switching backends (or the legacy hash corpus, which carries no
+        backend tag) leaves stale vectors behind; dense search skips
+        them, so report it instead of failing silently.
         """
         stored = getattr(self.vectors, "stored_dim", lambda: None)()
+        stored_backend = getattr(
+            self.vectors, "stored_backend", lambda: None)()
         current = self._current_dim()
+        current_backend = self._current_backend()
+        base = {"stored_dim": stored, "embed_dim": current,
+                "stored_backend": stored_backend,
+                "embed_backend": current_backend}
         if stored is None or current is None:
-            return {"stored_dim": stored, "embed_dim": current,
-                    "dense_ok": True, "warning": ""}
-        ok = stored == current
-        return {
-            "stored_dim": stored,
-            "embed_dim": current,
-            "dense_ok": ok,
-            "warning": ("" if ok else
-                        f"Stored vectors are dim {stored} but the embedder is "
-                        f"dim {current}: dense search skips old chunks. "
-                        "Re-ingest affected documents."),
-        }
+            return {**base, "dense_ok": True, "warning": ""}
+        if stored_backend is not None and stored_backend != current_backend:
+            return {**base, "dense_ok": False, "warning": (
+                f"Stored vectors are {stored_backend} but the embedder is "
+                f"{current_backend}: dense search skips old chunks. "
+                "Re-ingest affected documents.")}
+        if stored != current:
+            return {**base, "dense_ok": False, "warning": (
+                f"Stored vectors are dim {stored} but the embedder is "
+                f"dim {current}: dense search skips old chunks. "
+                "Re-ingest affected documents.")}
+        if stored_backend is None:
+            return {**base, "dense_ok": False, "warning": (
+                "Stored vectors predate backend tags (legacy hash "
+                "embeddings): dense search skips old chunks. "
+                "Re-ingest affected documents.")}
+        return {**base, "dense_ok": True, "warning": ""}
 
     # -- export / import -------------------------------------------------
     def export_library(self) -> dict:
@@ -597,8 +555,6 @@ class RAGService:
                 "text": full["text"],
                 "tags": full.get("tags", []),
                 "doc_type": full.get("doc_type", "document"),
-                "source": full.get("source", "upload"),
-                "source_uri": full.get("source_uri", ""),
                 "created_at": full.get("created_at", ""),
             })
         return {"version": 1, "documents": docs}
@@ -616,14 +572,14 @@ class RAGService:
                 continue
             if progress is not None:
                 progress(i, len(items), item.get("filename", ""))
-            source = item.get("source") or "text"
-            if source not in ("upload", "url", "text"):
-                source = "text"
+            stage_cb = (None if progress is None else
+                        _file_stage(progress, i, len(items),
+                                    item.get("filename", "")))
             try:
                 out.append(self.ingest_text(
                     item.get("filename", "import"), item.get("text", ""),
                     item.get("tags", []), item.get("doc_type", "document"),
-                    source, item.get("source_uri", "")))
+                    progress_frac=stage_cb))
             except Exception as e:  # per-doc failure must not break batch
                 out.append({"filename": item.get("filename", "?"),
                             "status": "failed", "error": str(e)})
@@ -635,27 +591,38 @@ class RAGService:
     def search(self, query: str, top_k: int = 5,
                doc_ids: list[str] | None = None,
                tags: list[str] | None = None,
-               source: str | None = None,
                doc_type: str | None = None,
                since: str | None = None) -> list[dict]:
         if not query.strip():
             return []
-        doc_ids = self._resolve_scope(doc_ids, tags, source, doc_type, since)
+        doc_ids = self._resolve_scope(doc_ids, tags, doc_type, since)
         # A filter that matches nothing must return nothing (not everything).
         if (doc_ids is not None) and not doc_ids:
             return []
         hybrid = self.settings.hybrid
         rerank_on = self.settings.rerank_enabled
         depth = max(top_k * _RETRIEVE_MULT, _RETRIEVE_MIN)
-        q = self.embedder.embed([query])[0]
-        dense_hits = self.vectors.search(q, depth if (hybrid or rerank_on) else top_k,
-                                         doc_ids)
-        skipped = getattr(self.vectors, "last_skipped", 0) or 0
+        # Backend gate: same-width vectors from another backend (or the
+        # untagged hash era) must not score against this embedder. Skipping
+        # here also skips embedding the query at all.
+        current_backend = self._current_backend()
+        stored_backend = getattr(
+            self.vectors, "stored_backend", lambda: None)()
+        if (current_backend is not None and self.vectors.count()
+                and stored_backend != current_backend):
+            dense_hits = []
+            skipped = self.vectors.count()
+            self.vectors.last_skipped = skipped
+        else:
+            q = self.embedder.embed([query])[0]
+            dense_hits = self.vectors.search(
+                q, depth if (hybrid or rerank_on) else top_k, doc_ids)
+            skipped = getattr(self.vectors, "last_skipped", 0) or 0
         if skipped and not self._dim_warned:
             self._dim_warned = True
             logger.warning(
                 "dense search skipped %d chunk(s) with a stale embedding "
-                "dimension (backend was switched?)", skipped)
+                "backend (re-ingest to restore dense search)", skipped)
         dense_by_id = {h.chunk_id: h for h in dense_hits}
 
         sparse_by_id: dict[str, float] = {}
@@ -688,24 +655,13 @@ class RAGService:
         }
 
         answer: dict[str, float] = {}
-        entail: dict[str, float] = {}
         if rerank_on and texts:
             pool_texts = [texts[cid] for cid in texts]
             cross = self._cross.score(query, pool_texts)
-            # NLI only runs when the cross-encoder did: the fallback path
-            # never consumes entailment, so running it alone is pure waste.
-            ent = self._nli.score(query, pool_texts) if cross is not None else None
-            if cross is not None and ent is not None:
-                # CLEAR inference (mode "all"): sigmoid(relevance) + alpha * entailment.
-                for cid, a, e in zip(texts, clear_answerability(
-                        cross, ent, self.settings.alpha_nli), ent):
-                    answer[cid] = a
-                    entail[cid] = e
-            else:
-                idf = self.sparse.idf_map(content_terms(query))
-                cov = [coverage_score(query, texts[cid], idf) for cid in texts]
-                for cid, a in zip(texts, combine_answerability(cross, cov)):
-                    answer[cid] = a
+            idf = self.sparse.idf_map(content_terms(query))
+            cov = [coverage_score(query, texts[cid], idf) for cid in texts]
+            for cid, a in zip(texts, combine_answerability(cross, cov)):
+                answer[cid] = a
 
         if rerank_on and texts:
             fnorm = minmax_norm({cid: fused[cid] for cid in texts})
@@ -730,17 +686,14 @@ class RAGService:
                 "dense_score": round(float(
                     dense_by_id[cid].score if cid in dense_by_id else 0.0), 4),
                 "fused_rank": fused_rank[cid],
-                "answerability": round(float(answer.get(cid, 0.0)), 4),
-                "entailment": round(float(entail.get(cid, 0.0)), 4),
             })
         return out
 
     def _resolve_scope(self, doc_ids: list[str] | None,
                        tags: list[str] | None,
-                       source: str | None,
                        doc_type: str | None = None,
                        since: str | None = None) -> list[str] | None:
-        """Intersect explicit doc ids with tag/source/type/recency filters.
+        """Intersect explicit doc ids with tag/type/recency filters.
 
         Tags are document-level metadata; chunks inherit their document's
         tags at query time, so tag filtering resolves to a doc-id
@@ -752,8 +705,6 @@ class RAGService:
             sets.append(set(doc_ids))
         if tags:
             sets.append(set(self.meta.doc_ids_for_tags(tags)))
-        if source:
-            sets.append(set(self.meta.doc_ids_for_source(source.strip().lower())))
         dtype = normalize_doc_type(doc_type, allow_empty=True)
         if dtype is not None:
             sets.append(set(self.meta.doc_ids_for_doc_type(dtype)))
