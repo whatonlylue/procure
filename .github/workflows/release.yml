@@ -4,6 +4,7 @@
 name: release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -20,12 +21,21 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
-      - uses: actions/setup-python@v7
+      # setup-uv installs its own Python (no setup-python needed) and
+      # caches wheels + the interpreter between runs.
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
+          enable-cache: true
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
 
       # Tauri shells out to pkg-config for system glib/GTK via tao ->
       # glib-sys on Linux; without these dev packages the glib-sys build
@@ -37,13 +47,13 @@ jobs:
 
       - name: Backend tests
         run: |
-          pip install .
-          python -m unittest discover -s tests
+          uv sync --locked
+          uv run --no-sync python -m unittest discover -s tests
 
       - name: Lint (ruff)
-        run: |
-          pip install ruff
-          ruff check app tests
+        # uvx runs the pinned prebuilt ruff binary from the uv cache,
+        # without touching the project venv.
+        run: uvx ruff@0.16.10 check app tests
 
       - name: Frontend typecheck + build
         run: |
@@ -80,12 +90,21 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
-      - uses: actions/setup-python@v7
+      # setup-uv installs its own Python (no setup-python needed) and
+      # caches wheels + the interpreter between runs.
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
+          enable-cache: true
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
 
       - name: Build frontend
         run: |
@@ -93,11 +112,12 @@ jobs:
           npm ci
           npm run build
 
+      # The `dev` extra is just pyinstaller; --locked keeps CI on uv.lock.
       - name: Install Python deps + PyInstaller
-        run: pip install . pyinstaller
+        run: uv sync --locked --extra dev
 
       - name: Build sidecar
-        run: pyinstaller --noconfirm procure-sidecar.spec
+        run: uv run --no-sync pyinstaller --noconfirm procure-sidecar.spec
 
       - name: Stage sidecar for Tauri (unix)
         if: runner.os != 'Windows'
@@ -114,11 +134,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
           Copy-Item dist/ProcureHelper.exe "src-tauri/binaries/ProcureHelper-$triple.exe"
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
-
+      # The Tauri CLI ships as the @tauri-apps/cli npm devDependency, so
+      # `npm ci` above already installed the runner-correct prebuilt binary
+      # (no cargo-binstall, no source compile lottery). It runs from the
+      # repo root so it finds src-tauri/tauri.conf.json.
       - name: Build Tauri bundle
-        run: cargo tauri build --bundles ${{ matrix.bundles }}
+        shell: bash
+        run: ./frontend/node_modules/.bin/tauri build --bundles ${{ matrix.bundles }}
 
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v7
