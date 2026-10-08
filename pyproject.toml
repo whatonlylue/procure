@@ -18,7 +18,6 @@ dependencies = [
 
 [project.optional-dependencies]
 ocr = ["rapidocr-onnxruntime>=1.0", "pymupdf>=1.24", "pillow>=10"]
-readability = ["readability-lxml>=0.8"]
 # Retrieval-benchmark dependencies (source checkouts only: app.bench is
 # excluded from built wheels/binaries below, so `pip install procure[bench]`
 # only makes sense alongside a git clone, for `bench pull --source beir`;
