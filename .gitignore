@@ -17,3 +17,4 @@ __pycache__/
 src-tauri/target/
 src-tauri/binaries/
 src-tauri/gen/
+src-tauri/resources/tesseract/

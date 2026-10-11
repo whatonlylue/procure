@@ -1,6 +1,6 @@
 [project]
 name = "procure"
-version = "0.2.4"
+version = "0.2.5"
 description = "Local-first RAG: drag-drop ingest, chunk+embed+store, semantic search."
 license = { text = "MIT" }
 requires-python = ">=3.11"
@@ -9,23 +9,23 @@ dependencies = [
   "uvicorn>=0.29",
   "python-multipart>=0.0.9",
   "numpy>=1.26",
-  "pypdf>=4.0",
+  "pypdfium2>=5",
   "mcp>=2,<3",
   "platformdirs>=4",
   "model2vec>=0.9",
   "huggingface_hub>=0.23",
+  "onnxruntime>=1.20",
+  "tokenizers>=0.20",
 ]
 
 [project.optional-dependencies]
-ocr = ["rapidocr-onnxruntime>=1.0", "pymupdf>=1.24", "pillow>=10"]
-readability = ["readability-lxml>=0.8"]
 # Retrieval-benchmark dependencies (source checkouts only: app.bench is
 # excluded from built wheels/binaries below, so `pip install procure[bench]`
 # only makes sense alongside a git clone, for `bench pull --source beir`;
 # the default mteb pull path and the rest of the harness are stdlib-only).
 bench = ["pyarrow>=12"]
 dev = ["pyinstaller>=6"]
-all = ["rapidocr-onnxruntime>=1.0", "pymupdf>=1.24", "pillow>=10", "readability-lxml>=0.8", "pyarrow>=12"]
+all = ["pyarrow>=12"]
 
 [project.scripts]
 procure = "app.cli:main"

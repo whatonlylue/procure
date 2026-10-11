@@ -13,6 +13,7 @@ import tempfile
 import unittest
 
 from app.search import SparseStore, content_terms
+from app.store import close_keepalives
 from app.config import Settings
 from app.service import RAGService
 from stub_embedder import StubEmbedder
@@ -28,6 +29,7 @@ class SparseFtsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(close_keepalives)
         self.store = SparseStore(os.path.join(self.tmp.name, "sparse.sqlite"))
         self.store.upsert_chunks(
             ["c1", "c2", "c3"],

@@ -5,6 +5,7 @@ import contextlib
 import os
 import re
 import sqlite3
+import threading
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
@@ -53,6 +54,46 @@ def normalize_doc_type(value: str | None,
         f"Unknown doc_type: {value!r} (want document|memory)")
 
 
+_KEEPALIVES: dict[str, sqlite3.Connection] = {}
+_KEEPALIVE_LOCK = threading.Lock()
+
+
+def keepalive(path: str) -> None:
+    """Hold one idle connection open to the SQLite DB at ``path`` for the life
+    of the process so closing per-call connections never triggers a WAL
+    checkpoint+delete. Idempotent per resolved absolute path; thread-safe."""
+    key = os.path.abspath(path)
+    with _KEEPALIVE_LOCK:
+        if key in _KEEPALIVES:
+            return
+        c = sqlite3.connect(key, timeout=10.0, check_same_thread=False)
+        try:
+            # No transaction is left open: fetchone() on a pragma returns
+            # its single row, so the statement is finished.
+            c.execute("PRAGMA journal_mode=WAL").fetchone()
+        except Exception:
+            c.close()
+            raise
+        _KEEPALIVES[key] = c
+
+
+def close_keepalive(path: str) -> None:
+    """Close the keepalive connection for ``path`` if one is held."""
+    with _KEEPALIVE_LOCK:
+        c = _KEEPALIVES.pop(os.path.abspath(path), None)
+    if c is not None:
+        c.close()
+
+
+def close_keepalives() -> None:
+    """Close every held keepalive connection (tests / shutdown)."""
+    with _KEEPALIVE_LOCK:
+        conns = list(_KEEPALIVES.values())
+        _KEEPALIVES.clear()
+    for c in conns:
+        c.close()
+
+
 class MetaStore:
     def __init__(self, path: str):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -79,6 +120,7 @@ class MetaStore:
                 "CREATE INDEX IF NOT EXISTS idx_doc_tags_tag ON doc_tags(tag)"
             )
             self._migrate(c)
+        keepalive(self.path)
 
     def _migrate(self, c: sqlite3.Connection) -> None:
         cols = {r[1] for r in c.execute("PRAGMA table_info(documents)").fetchall()}

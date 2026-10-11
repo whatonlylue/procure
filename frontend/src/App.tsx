@@ -34,16 +34,18 @@ import {
   uploadFilesAsync,
   workspaceLogs,
 } from "./api";
+import { TooltipLayer } from "./tooltip";
 import { THEMES, ThemeName, applyTheme, getInitialTheme } from "./theme";
 import { Toast, ToastKind, ToastStack } from "./toasts";
 
-type Tab = "search" | "library" | "sources" | "mcp";
+type Tab = "search" | "library" | "sources" | "mcp" | "settings";
 
 const TABS: { id: Tab; label: string; key: string }[] = [
   { id: "search", label: "Search", key: "1" },
   { id: "library", label: "Library", key: "2" },
   { id: "sources", label: "Sources", key: "3" },
   { id: "mcp", label: "MCP Server", key: "4" },
+  { id: "settings", label: "Settings", key: "5" },
 ];
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp"]);
@@ -339,7 +341,7 @@ export default function App() {
     return () => { alive = false; };
   }, [tab]);
 
-  // Keyboard: "/" or Cmd/Ctrl+K focuses search; 1-4 switch tabs.
+  // Keyboard: "/" or Cmd/Ctrl+K focuses search; 1-5 switch tabs.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const t = e.target as HTMLElement | null;
@@ -548,11 +550,15 @@ export default function App() {
     return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
   }
 
-  async function changeSetting(patch: { search?: string; rerank?: string; mcp_autostart?: boolean }) {
+  async function changeSetting(patch: { search?: string; rerank?: string; embedding_backend?: string; mcp_autostart?: boolean }) {
     setNotice("");
     try {
       const s = await updateSettings(patch);
-      setBackend((b) => (b ? { ...b, search: s.search, rerank: s.rerank, mcp_autostart: s.mcp_autostart } : b));
+      setBackend((b) => (b ? { ...b, search: s.search, rerank: s.rerank, embedding_backend: s.embedding_backend ?? b.embedding_backend, mcp_autostart: s.mcp_autostart } : b));
+      if (s.job) {
+        setJob(s.job);
+        pollJob(s.job.job_id);
+      }
       if ((patch.search !== undefined || patch.rerank !== undefined) && mcp?.running) {
         setNotice("Retrieval settings saved — restart the MCP server to apply them there.");
       }
@@ -627,6 +633,7 @@ export default function App() {
   return (
     <div className="shell">
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      <TooltipLayer />
       <aside className="side">
         <div className="side-brand">
           <span className="logo">P</span>
@@ -640,48 +647,27 @@ export default function App() {
             <button key={t.id} className={tab === t.id ? "on" : ""} onClick={() => setTab(t.id)}>
               <span className="key">{t.key}</span> {t.label}
               {t.id === "library" && <span className="count mono">{docsTotal}</span>}
-              {t.id === "mcp" && mcp?.running && <span className="dot" title="MCP server running" />}
+              {t.id === "mcp" && mcp?.running && <span className="dot" data-tip="MCP server running" />}
             </button>
           ))}
         </nav>
 
         <div className="side-label">SEARCH SETUP</div>
         <dl className="side-meta mono">
-          <div title="How results are found"><dt>MATCHING</dt><dd>{mode}</dd></div>
-          <div title={neural ? "Neural cross-encoder when loaded, word-match coverage otherwise" : "Word-match coverage (no neural models in this build)"}><dt>ANSWER RANK</dt><dd>{rerank}</dd></div>
+          <div data-tip="How results are found"><dt>MATCHING</dt><dd>{mode}</dd></div>
+          <div data-tip="Model that turns text into vectors (change in Settings)"><dt>EMBEDDER</dt><dd>{(backend?.embedding_backend ?? "potion") === "granite" ? "Granite" : "potion"}</dd></div>
+          <div data-tip={neural ? "Ettin cross-encoder reranking is loaded" : "Ettin cross-encoder not loaded: word-match coverage is used instead"}><dt>RERANK</dt><dd>{rerank}</dd></div>
           <div><dt>RESULTS</dt><dd>{topK}</dd></div>
           <div><dt>CHUNKS</dt><dd>{backend?.chunks ?? "—"}</dd></div>
           <div><dt>READY</dt><dd>{ready}{scopeTruncated ? "+" : ""}/{docsTotal}</dd></div>
-          <div title="OCR backend for scanned PDFs and images"><dt>OCR</dt><dd>{backend?.ocr || "off"}</dd></div>
+          <div data-tip="OCR backend for scanned PDFs and images"><dt>OCR</dt><dd>{backend?.ocr || "off"}</dd></div>
         </dl>
-        <p className="side-hint">Matching + ranking can be changed from the Search tab.</p>
         {backend?.dense && !backend.dense.dense_ok && (
-          <p className="warn mono" title={backend.dense.warning}>
+          <p className="warn mono" data-tip={backend.dense.warning}>
             DENSE DEGRADED — {backend.dense.warning}
           </p>
         )}
 
-        <div className="side-label">THEME</div>
-        <div className="theme-swatches" role="group" aria-label="Color theme">
-          {THEMES.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              className={theme === t.id ? "on" : ""}
-              onClick={() => setTheme(t.id)}
-              aria-pressed={theme === t.id}
-              title={t.blurb}
-            >
-              <span className="swatch" data-swatch={t.id} aria-hidden="true" />
-              {t.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="side-foot mono">
-          <span>/ focus</span>
-          <span>⌘K focus</span>
-        </div>
       </aside>
 
       <div className="main">
@@ -689,7 +675,7 @@ export default function App() {
           <div className="progress" role="status">
             <div className="progress-row mono">
               <span>
-                {job.total > 0 ? `FILE ${Math.min(Math.floor(job.done) + 1, job.total)}/${job.total}` : job.label.toUpperCase()}
+                {job.total > 0 ? `${job.kind === "reembed" ? "CHUNK" : "FILE"} ${Math.min(Math.floor(job.done) + 1, job.total)}/${job.total}` : job.label.toUpperCase()}
               </span>
               <span className="truncate">{job.current || job.label}</span>
               <span>{job.total > 0 ? `${jobPct}%` : "…"}</span>
@@ -713,10 +699,11 @@ export default function App() {
                   ref={searchRef}
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Ask across your documents…  ( / to focus )"
+                  placeholder="Ask across your documents…"
+                  data-tip="Press / or ⌘K to focus search"
                 />
                 <button type="submit" disabled={!query.trim() || !!busy}>Search</button>
-                <button type="button" className="ghost" onClick={clearSearch} title="Clear results and start over">Clear</button>
+                <button type="button" className="ghost" onClick={clearSearch} data-tip="Clear results and start over">Clear</button>
               </form>
             ) : (
               <div className="hero">
@@ -760,12 +747,13 @@ export default function App() {
                       </select>
                     </label>
                     <label className="ctl">
-                      <span>ANSWER RANK</span>
+                      <span>RERANK (ETTIN)</span>
                       <select
                         className="mono"
                         value={off ? "off" : "on"}
                         onChange={(e) => changeSetting({ rerank: e.target.value })}
-                        aria-label="Answer ranking"
+                        aria-label="Rerank with the Ettin cross-encoder"
+                        data-tip="Re-scores the top results by reading query and passage together. Does not change stored embeddings. Falls back to word-match scoring until the Ettin model has downloaded."
                       >
                         <option value="on">On{neural ? "" : " (words)"}</option>
                         <option value="off">Off</option>
@@ -805,7 +793,7 @@ export default function App() {
                             type="button"
                             className={`chip mono${filterTags.has(t.tag) ? " on" : ""}`}
                             onClick={() => toggleInSet(setFilterTags, t.tag)}
-                            title={`${t.count} document(s)`}
+                            data-tip={`${t.count} document(s)`}
                           >
                             {t.tag} · {t.count}
                           </button>
@@ -870,14 +858,14 @@ export default function App() {
                     <span className="rank mono">#{i + 1}</span>
                     <span className="file">{h.filename}</span>
                     {h.doc_type === "memory" && (
-                      <span className="pill mono memory" title="Cross-agent memory">MEMORY</span>
+                      <span className="pill mono memory" data-tip="Cross-agent memory">MEMORY</span>
                     )}
-                    <span className="score mono" title="Blended rank score for your query">SCORE <b>{fmt(h.score)}</b></span>
+                    <span className="score mono" data-tip="Blended rank score for your query">SCORE <b>{fmt(h.score)}</b></span>
                   </div>
                   <p className="snippet">{h.text}</p>
                   <div className="signals mono">
-                    <span title="Exact-word match strength, relative to the best match in these results">WORD MATCH <b>{sparseMax > 0 ? fmt((h.sparse_score ?? 0) / sparseMax) : "0%"}</b></span>
-                    <span title="How close the meaning is to your query">MEANING <b>{fmt(h.dense_score)}</b></span>
+                    <span data-tip="Exact-word match strength, relative to the best match in these results">WORD MATCH <b>{sparseMax > 0 ? fmt((h.sparse_score ?? 0) / sparseMax) : "0%"}</b></span>
+                    <span data-tip="How close the meaning is to your query">MEANING <b>{fmt(h.dense_score)}</b></span>
                   </div>
                 </li>
               ))}
@@ -936,8 +924,8 @@ export default function App() {
                   Delete selected
                 </button>
               )}
-              <button onClick={handleExport} title="Download a JSON backup of the library">Export</button>
-              <button onClick={() => importRef.current?.click()} title="Restore from an export file">Import</button>
+              <button onClick={handleExport} data-tip="Download a JSON backup of the library">Export</button>
+              <button onClick={() => importRef.current?.click()} data-tip="Restore from an export file">Import</button>
               <input
                 ref={importRef}
                 type="file"
@@ -999,7 +987,7 @@ export default function App() {
                         <span
                           className="tagview"
                           onClick={() => { setEditingTags(d.doc_id); setTagDraft((d.tags ?? []).join(", ")); }}
-                          title="Click to edit tags"
+                          data-tip="Click to edit tags"
                           role="button"
                           tabIndex={0}
                           onKeyDown={(e) => {
@@ -1018,9 +1006,9 @@ export default function App() {
                     <td className="acts">
                       <button onClick={() => doReingest(d.doc_id)}>Re-ingest</button>
                       {(d.doc_type || "document") === "memory" ? (
-                        <button onClick={() => handleRenameType(d.doc_id, { doc_type: "document" })} title="Convert to a regular document">Unmark memory</button>
+                        <button onClick={() => handleRenameType(d.doc_id, { doc_type: "document" })} data-tip="Convert to a regular document">Unmark memory</button>
                       ) : (
-                        <button onClick={() => handleRenameType(d.doc_id, { doc_type: "memory" })} title="Convert to a cross-agent memory">Mark memory</button>
+                        <button onClick={() => handleRenameType(d.doc_id, { doc_type: "memory" })} data-tip="Convert to a cross-agent memory">Mark memory</button>
                       )}
                       <button className="danger" onClick={() => doDelete(d.doc_id)}>Delete</button>
                     </td>
@@ -1077,6 +1065,47 @@ export default function App() {
             </div>
 
           </main>
+        ) : tab === "settings" ? (
+          <main>
+            <div className="resultmeta mono">APPEARANCE</div>
+            <section className="settings-card">
+              <div className="theme-swatches" role="group" aria-label="Color theme">
+                {THEMES.map((t) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    className={theme === t.id ? "on" : ""}
+                    onClick={() => setTheme(t.id)}
+                    aria-pressed={theme === t.id}
+                    data-tip={t.blurb}
+                  >
+                    <span className="swatch" data-swatch={t.id} aria-hidden="true" />
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <div className="resultmeta mono">EMBEDDING MODEL</div>
+            <section className="settings-card">
+              <label
+                className="ctl"
+                data-tip={"Embeddings turn every chunk and every query into vectors for similarity search. Switching re-embeds your entire library as a background job; until it finishes, meaning-based search is off and results come from keyword matching only.\n\nFast (potion): potion-retrieval-32M, the default. Static lookup, very fast ingest.\nAccurate (Granite): Granite Embedding R2 small. More accurate, much slower to ingest; downloads ~50 MB once.\n\nSeparate from reranking (Search tab, Filters), which only re-scores results at query time and never changes stored vectors."}
+              >
+                <span>EMBEDDING</span>
+                <select
+                  className="mono"
+                  value={backend?.embedding_backend ?? "potion"}
+                  onChange={(e) => changeSetting({ embedding_backend: e.target.value })}
+                  aria-label="Embedding model"
+                  disabled={jobActive}
+                >
+                  <option value="potion">Fast (potion)</option>
+                  <option value="granite">Accurate (Granite)</option>
+                </select>
+              </label>
+            </section>
+          </main>
         ) : (
           <main>
             <div className="mcpbar">
@@ -1106,7 +1135,10 @@ export default function App() {
               Start automatically with the workspace
             </label>
 
-            <div className="mcpurl">
+            <div
+              className="mcpurl"
+              data-tip={`Register this URL as a Streamable HTTP server in your harness (e.g. Muse mcp add --transport http procure ${mcp?.url ?? "…"}). Same library, embeddings, and search pipeline as this workspace.`}
+            >
               <input
                 className="mono"
                 readOnly
@@ -1119,11 +1151,6 @@ export default function App() {
                 {copied ? "Copied" : "Copy"}
               </button>
             </div>
-            <p className="side-hint">
-              Register this URL as a Streamable HTTP server in your harness
-              (e.g. <code className="mono">Muse mcp add --transport http procure {mcp?.url ?? "…"}</code>).
-              Same library, embeddings, and search pipeline as this workspace.
-            </p>
 
             <details className="mcptools">
               <summary className="mono">
@@ -1139,12 +1166,10 @@ export default function App() {
               )}
             </details>
 
-            <div className="resultmeta mono">AGENT SKILL{skill?.version ? ` · v${skill.version}` : ""}</div>
-            <p className="side-hint">
-              Install the procure skill into your agent harnesses so agents proactively
-              search the library and save memories. Existing installs are left alone;
-              reinstall to pick up skill updates.
-            </p>
+            <div
+              className="resultmeta mono"
+              data-tip="Install the procure skill into your agent harnesses so agents proactively search the library and save memories. Existing installs are left alone; reinstall to pick up skill updates."
+            >AGENT SKILL{skill?.version ? ` · v${skill.version}` : ""}</div>
             {skill && (
               <table className="lib">
                 <thead>

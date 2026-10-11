@@ -7,17 +7,18 @@
 ## Features
 
 - **Desktop app** — Tauri shell + Python sidecar that manages its own server; documents live in the OS user-data dir and survive upgrades.
-- **Broad ingest** — pdf / docx / pptx / xlsx / epub / odt+ods+odp / rtf / csv / json / xml / md / txt and more, all parsed dependency-free → sentence-aware ~1000-char chunks (150-char overlap, never split mid-sentence) → embedded + stored.
+- **Broad ingest** — pdf / docx / pptx / xlsx / epub / odt+ods+odp / rtf / csv / json / xml / md / txt and more, all parsed locally → sentence-aware ~1000-char chunks (150-char overlap, never split mid-sentence) → embedded + stored.
 - **Sources** — drag-and-drop files (or browse) to ingest them into the library.
-- **Scanned documents** — thin-page detection routes scanned PDFs and images through optional local OCR (RapidOCR preferred, Tesseract fallback): `uv pip install -e '.[ocr]'`.
+- **Scanned documents** — thin-page detection routes scanned PDFs and images through local OCR via the Tesseract 5 CLI. It is bundled in the desktop app; source installs need Tesseract on `PATH` (`brew install tesseract`, the UB-Mannheim installer on Windows, `apt install tesseract-ocr` on Linux) or `PROCURE_TESSERACT` set to the binary.
 - **Dedup + background jobs** — sha256 content hashing skips re-uploads; uploads run as cancellable background jobs with progress.
 - **Tags + scoped search** — document-level tags inherited by chunks at query time; filter search by tags, type, or an explicit doc set from the Search tab.
-- **Hybrid retrieval** — zero-dependency BM25 sparse scores fused with dense cosine via reciprocal-rank fusion (RRF) [1].
-- **Reranking** — a local Ettin cross-encoder (`cross-encoder/ettin-reranker-17m-v1`) blended with IDF-weighted term coverage, so answer-bearing chunks outrank topical distractors. Degrades gracefully (cross-encoder + term coverage → coverage alone) when the model is unavailable. Retrieval mode and rerank toggle at runtime.
+- **Hybrid retrieval** — zero-dependency BM25 sparse scores (SQLite FTS5, porter stemmer) fused with dense cosine via a convex score blend: each list min-max normalized, weighted 0.3 dense / 0.7 sparse with the default embedder (0.7 dense / 0.3 sparse with Granite).
+- **Reranking** — a local Ettin cross-encoder (`cross-encoder/ettin-reranker-17m-v1`, run torch-free via ONNX Runtime, desktop app included) with its logits min-max scaled within the candidate pool and blended 0.7 rerank / 0.3 retrieval. The ~67 MB model downloads on first use in the background; until it is ready, or offline, an IDF-weighted term-coverage heuristic is blended with retrieval instead, so answer-bearing chunks outrank topical distractors. Retrieval mode and rerank toggle at runtime.
 - **Library tab** — per-document status (`ready`/`failed`), chunk counts, tags, delete, re-ingest.
 - **MCP server tab** — one click starts a Streamable-HTTP Model Context Protocol server exposing `procure_search` (tag + type + recency scope), `procure_add_text`, `procure_update_text`, `procure_delete_document`, `procure_list_documents` (paged + filtered), plus `procure://documents/{id}` full-text resources — any agent harness can search, read, write, revise, and delete in the library.
 - **Cross-agent memories** — documents typed `memory` are shared across agent sessions and harnesses: agents save with `procure_add_text(..., doc_type="memory")` and recall with `procure_search(..., doc_type="memory")` whenever the user references previous work.
 - **Local-only pipeline** — potion-retrieval-32M (512-dim, MIT, static model2vec embeddings) running on CPU (no GPU mode exists — static lookup, ~16k texts/s) plus a SQLite vector store; no accounts, no cloud. The ~120MB model downloads once into the HF cache on first ingest.
+- **Accurate embeddings** — optional Granite Embedding R2 small (int8 ONNX, ~50 MB download on first use), chosen with the Embedding setting in the app or `PROCURE_EMBEDDING_BACKEND=granite`. Ingest is much slower, and switching re-embeds the whole library as a background job (`POST /api/reembed`).
 
 ## Run from source
 
@@ -55,14 +56,16 @@ The same content is always served live as the `procure://guide` resource.
 | `PROCURE_EMBEDDING_BATCH` / `PROCURE_EMBEDDING_MAX_LENGTH` | `32` / `512` | texts per inference step · token cap per text |
 | `PROCURE_SEARCH` / `PROCURE_RERANK` | `hybrid` / `on` | retrieval mode · rerank |
 | `PROCURE_TOPK` | `5` | default hits per query |
-| `PROCURE_CROSS_ENCODER_ALLOW_DOWNLOAD` | `0` | set `1` once to fetch the rerank model, then stays offline |
+| `PROCURE_CROSS_ENCODER` | `cross-encoder/ettin-reranker-17m-v1` | rerank model · set to empty to disable reranking |
+| `PROCURE_CROSS_ENCODER_ALLOW_DOWNLOAD` | `1` | fetch the rerank model on first use · set `0` to stay offline (cache only) |
+| `PROCURE_EMBEDDING_BACKEND` | `potion` | `potion` (fast) · `granite` (Accurate mode, see Features) |
+| `PROCURE_EMBEDDING_ALLOW_DOWNLOAD` | `1` | fetch the Granite model on first use · set `0` to stay offline |
+| `PROCURE_GRANITE_DIR` | HF cache | pre-downloaded Granite ONNX repo checkout (offline use) |
 | `PROCURE_DATA_DIR` | OS user-data dir | raw files + databases (same default for the app, CLI, and MCP server) |
-| `PROCURE_OCR` | `auto` | `auto` (scanned pages) · `on` (every PDF page) · `off` — OCR for scanned PDFs/images (needs `[ocr]` extra) |
+| `PROCURE_OCR` | `auto` | `auto` (scanned pages) · `on` (every PDF page) · `off` — OCR for scanned PDFs/images (Tesseract, see Features) |
+| `PROCURE_TESSERACT` | unset | absolute path to the Tesseract binary (source installs without it on `PATH`) |
+| `PROCURE_OCR_LANG` | `eng` | Tesseract language code(s) |
 | `PROCURE_MAX_UPLOAD_MB` | `100` | per-file upload cap in megabytes (413 beyond it) |
-
-## References
-
-[1] Cormack, Clarke & Buettcher — *Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning Methods* (SIGIR 2009).
 
 ## API (dev)
 

@@ -98,12 +98,29 @@ def extract_text(path: str, filename: str, *, ocr_mode: str = "auto") -> str:
 
 
 def _extract_pdf(path: str, ocr_mode: str) -> str:
-    from pypdf import PdfReader
+    import pypdfium2 as pdfium
 
     from app.ocr import THIN_PAGE_CHARS, available, ocr_pdf_pages
 
-    reader = PdfReader(path)
-    pages = [(p.extract_text() or "") for p in reader.pages]
+    pages: list[str] = []
+    try:
+        doc = pdfium.PdfDocument(path)
+    except pdfium.PdfiumError as e:  # corrupt, or password-protected
+        raise ValueError(f"Could not read PDF (corrupt or encrypted): {e}") from e
+    try:
+        for i in range(len(doc)):
+            page = doc[i]
+            try:
+                tp = page.get_textpage()
+                try:
+                    raw = tp.get_text_range() or ""
+                finally:
+                    tp.close()
+            finally:
+                page.close()
+            pages.append(raw.replace("\r\n", "\n").replace("\r", "\n"))
+    finally:
+        doc.close()
     texts = [t.strip() for t in pages]
     thin = [i for i, t in enumerate(texts)
             if len(re.sub(r"\s+", "", t)) < THIN_PAGE_CHARS]
@@ -122,7 +139,8 @@ def _extract_pdf(path: str, ocr_mode: str) -> str:
         if not available():
             raise ValueError(
                 "No text found — this looks like a scanned PDF. "
-                "Install OCR support (uv pip install -e '.[ocr]') and retry"
+                "OCR needs Tesseract: install it or set PROCURE_TESSERACT, "
+                "then retry"
             )
         if ocr_mode == "off":
             raise ValueError(
@@ -141,7 +159,7 @@ def _extract_image(path: str, ocr_mode: str) -> str:
 
     if ocr_mode == "off" or not available():
         raise ValueError(
-            "Image files need OCR support (uv pip install -e '.[ocr]')"
+            "Image files need OCR: install Tesseract or set PROCURE_TESSERACT"
         )
     return ocr_image(path)
 

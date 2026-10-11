@@ -11,7 +11,7 @@ metadata:
 
 procure is a local-first personal library: ingested documents are split into
 chunks, embedded, and stored for hybrid (keyword + meaning) search with a
-cross-encoder reranker. This guide is also served live as the
+reranker (cross-encoder when available). This guide is also served live as the
 `procure://guide` MCP resource.
 
 Documents have a type: `document` (files, uploads, ordinary notes)
@@ -22,7 +22,7 @@ harness). Filter by type whenever you only want one kind.
 
 - `procure_search(query, top_k=5, doc_ids=None, tags=None,
   doc_type=None, since=None)` — hybrid BM25 + dense
-  retrieval fused with RRF, reranked with a cross-encoder. Every hit
+  retrieval fused with a convex score blend, then reranked (cross-encoder when available, otherwise term coverage). Every hit
   carries `doc_id`, `filename`, `doc_type`, `chunk_id`, `text`, `score`,
   `sparse_score`, `dense_score`, `fused_rank`, and a `uri` for the full
   document. Use `doc_ids` to scope the search after

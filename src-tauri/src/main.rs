@@ -118,16 +118,31 @@ async fn wait_for_url(rx: &mut tokio::sync::mpsc::Receiver<CommandEvent>) -> Res
     }
 }
 
+/// Locate the Tesseract staged by scripts/bundle_tesseract.*; None if absent.
+fn bundled_tesseract(handle: &AppHandle) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let dir = handle.path().resource_dir().ok()?.join("tesseract");
+    let name = if cfg!(windows) { "tesseract.exe" } else { "tesseract" };
+    let bin = dir.join(name);
+    bin.is_file().then(|| (bin, dir.join("tessdata")))
+}
+
 fn spawn_sidecar(
     handle: &AppHandle,
     port: u16,
     data_dir: &std::path::Path,
 ) -> Result<(tokio::sync::mpsc::Receiver<CommandEvent>, CommandChild), String> {
     let port_arg = port.to_string();
-    let (rx, child) = handle
+    let mut cmd = handle
         .shell()
         .sidecar("ProcureHelper")
-        .map_err(|e| format!("sidecar lookup: {e}"))?
+        .map_err(|e| format!("sidecar lookup: {e}"))?;
+    // Bundled Tesseract (absent in dev builds): point the sidecar at it.
+    if let Some((bin, tessdata)) = bundled_tesseract(handle) {
+        cmd = cmd
+            .env("PROCURE_TESSERACT", bin)
+            .env("TESSDATA_PREFIX", tessdata);
+    }
+    let (rx, child) = cmd
         .args([
             "serve",
             "--port",

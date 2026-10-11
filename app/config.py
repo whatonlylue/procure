@@ -23,6 +23,14 @@ def _truthy(value: str) -> bool:
     return value.strip().lower() not in ("", "0", "false", "no", "off")
 
 
+EMBEDDING_BACKENDS = ("potion", "granite")
+
+
+def _backend_name(value: str) -> str:
+    v = (value or "").strip().lower()
+    return v if v in EMBEDDING_BACKENDS else "potion"
+
+
 @dataclass
 class Settings:
     """Mutable so the workspace can change retrieval settings at runtime
@@ -43,25 +51,43 @@ class Settings:
         "PROCURE_EMBEDDING_BATCH", "32")))
     embedding_max_length: int = field(default_factory=lambda: int(_env(
         "PROCURE_EMBEDDING_MAX_LENGTH", "512")))
+    # Embedding backend: "potion" (fast static model, default) | "granite"
+    # (Granite Embedding R2 small int8 ONNX; more accurate, far slower to
+    # ingest). Switching re-embeds the library (see RAGService.start_reembed).
+    embedding_backend: str = field(default_factory=lambda: _backend_name(
+        _env("PROCURE_EMBEDDING_BACKEND", "potion")))
+    granite_model: str = field(default_factory=lambda: _env(
+        "PROCURE_GRANITE_MODEL",
+        "onnx-community/granite-embedding-small-english-r2-ONNX"))
+    # Pre-downloaded checkout of the Granite ONNX repo (offline use).
+    granite_dir: str = field(default_factory=lambda: _env(
+        "PROCURE_GRANITE_DIR", ""))
+    # Allow fetching the Granite model from the HF Hub when it is selected.
+    embedding_allow_download: bool = field(default_factory=lambda: _truthy(_env(
+        "PROCURE_EMBEDDING_ALLOW_DOWNLOAD", "1")))
     chunk_size: int = field(default_factory=lambda: int(_env("PROCURE_CHUNK_SIZE", "1000")))
     chunk_overlap: int = field(default_factory=lambda: int(_env("PROCURE_CHUNK_OVERLAP", "150")))
-    # Search: "hybrid" (BM25 + dense with RRF fusion) | "dense" (cosine only)
+    # Search: "hybrid" (BM25 + dense, convex score fusion) | "dense" (cosine only)
     search_mode: str = field(default_factory=lambda: _env("PROCURE_SEARCH", "hybrid").lower())
     # Rerank on top of retrieval: "on" | "off"
     rerank: str = field(default_factory=lambda: _env("PROCURE_RERANK", "on").lower())
     top_k: int = field(default_factory=lambda: int(_env("PROCURE_TOPK", "5")))
-    # Local cross-encoder model for the reranker (cached only
-    # unless PROCURE_CROSS_ENCODER_ALLOW_DOWNLOAD=1); "" disables it.
+    # Cross-encoder reranker, run torch-free (ONNX backbone + numpy head, see
+    # app/rerank_onnx.py). The model downloads on first use in the background
+    # (searches use the coverage heuristic until it is ready); set
+    # PROCURE_CROSS_ENCODER_ALLOW_DOWNLOAD=0 to stay offline (cache only), or
+    # PROCURE_CROSS_ENCODER="" to disable it.
     cross_encoder_model: str = field(default_factory=lambda: _env(
         "PROCURE_CROSS_ENCODER", "cross-encoder/ettin-reranker-17m-v1"))
     cross_encoder_download: bool = field(default_factory=lambda: _truthy(_env(
-        "PROCURE_CROSS_ENCODER_ALLOW_DOWNLOAD", "0")))
+        "PROCURE_CROSS_ENCODER_ALLOW_DOWNLOAD", "1")))
     # MCP server (Streamable HTTP) bind address. Served at http://host:port/mcp.
     mcp_host: str = field(default_factory=lambda: _env("PROCURE_MCP_HOST", "127.0.0.1"))
     mcp_port: int = field(default_factory=lambda: int(_env("PROCURE_MCP_PORT", "8001")))
     # OCR: "auto" (thin/scanned pages only) | "on" (force OCR on every PDF
     # page; images are always OCRed) | "off" (never OCR; scanned files fail
-    # with guidance). Needs the [ocr] extra either way.
+    # with guidance). Needs Tesseract either way: bundled in the desktop app;
+    # source installs need the binary on PATH or PROCURE_TESSERACT set.
     ocr_mode: str = field(default_factory=lambda: _env("PROCURE_OCR", "auto").lower())
     # Per-file upload cap in megabytes (413 beyond it).
     max_upload_mb: int = field(
@@ -94,11 +120,14 @@ class Settings:
         rerank = data.get("rerank")
         if isinstance(rerank, str) and rerank.strip().lower() in ("on", "off"):
             self.rerank = rerank.strip().lower()
+        backend = data.get("embedding_backend")
+        if isinstance(backend, str) and backend.strip().lower() in EMBEDDING_BACKENDS:
+            self.embedding_backend = backend.strip().lower()
         if isinstance(data.get("mcp_autostart"), bool):
             self.mcp_autostart = data["mcp_autostart"]
 
     def save_overrides(self) -> None:
-        """Persist runtime-toggled settings (search/rerank/autostart)."""
+        """Persist runtime-toggled settings (search/rerank/embedding backend/autostart)."""
         os.makedirs(self.data_dir, exist_ok=True)
         path = os.path.join(self.data_dir, "settings.json")
         tmp = path + ".tmp"
@@ -106,6 +135,7 @@ class Settings:
             json.dump({
                 "search": self.search_mode,
                 "rerank": self.rerank,
+                "embedding_backend": self.embedding_backend,
                 "mcp_autostart": self.mcp_autostart,
             }, f, indent=2)
         os.replace(tmp, path)

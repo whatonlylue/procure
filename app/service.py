@@ -10,16 +10,17 @@ from collections.abc import Callable
 from functools import lru_cache
 
 from app import chunking, extract
-from app.config import Settings, get_settings
-from app.embeddings import Model2VecEmbedder
+from app.config import EMBEDDING_BACKENDS, Settings, get_settings
+from app.embeddings import build_embedder
 from app.search import (
     CrossEncoderScorer,
     SparseStore,
     combine_answerability,
     content_terms,
+    DENSE_WEIGHT,
+    convex_fuse,
     coverage_score,
     minmax_norm,
-    rrf_fuse,
 )
 from app.store import MetaStore, normalize_doc_type
 from app.vectordb.sqlite_vec import DimensionMismatchError, SqliteVectorStore
@@ -36,6 +37,9 @@ _RERANK_MIN = 15
 # Final blend: normalized fused retrieval score vs rerank signal.
 _W_FUSED = 0.5
 _W_ANSWER = 0.5
+# Blend when the cross-encoder answered (its scores are min-max scaled).
+_W_FUSED_CE = 0.3
+_W_ANSWER_CE = 0.7
 
 _TEXT_EXTENSIONS = (".txt", ".md", ".markdown")
 
@@ -75,12 +79,7 @@ class RAGService:
         if embedder is not None:
             self.embedder = embedder
         else:
-            s = self.settings
-            self.embedder = Model2VecEmbedder(
-                model=s.embedding_model,
-                model_dir=s.embedding_dir or None,
-                batch_size=s.embedding_batch,
-                max_length=s.embedding_max_length)
+            self.embedder = build_embedder(self.settings)
         self.vectors = SqliteVectorStore(self.settings.vec_db)
         self.sparse = SparseStore(self.settings.sparse_db)
         self._cross = CrossEncoderScorer(
@@ -394,7 +393,8 @@ class RAGService:
 
     # -- runtime settings -----------------------------------------------
     def update_settings(self, search: str | None = None,
-                        rerank: str | None = None) -> dict:
+                        rerank: str | None = None,
+                        embedding_backend: str | None = None) -> dict:
         """Change retrieval settings (persisted; the MCP server reads the
         persisted values when it is (re)started).
 
@@ -410,9 +410,27 @@ class RAGService:
             if flag not in ("on", "off"):
                 raise ValueError(f"Unknown rerank flag: {rerank!r} (want on|off)")
             self.settings.rerank = flag
-        if search is not None or rerank is not None:
+        switched = False
+        if embedding_backend is not None:
+            name = embedding_backend.strip().lower()
+            if name not in EMBEDDING_BACKENDS:
+                raise ValueError(
+                    f"Unknown embedding backend: {embedding_backend!r} "
+                    "(want potion|granite)")
+            if name != self.settings.embedding_backend:
+                self.settings.embedding_backend = name
+                self.embedder = build_embedder(self.settings)
+                self._embed_dim_cached = None
+                self._dim_warned = False
+                switched = True
+        if search is not None or rerank is not None or embedding_backend is not None:
             self.settings.save_overrides()
-        return {"search": self.settings.search_mode, "rerank": self.settings.rerank}
+        out = {"search": self.settings.search_mode,
+               "rerank": self.settings.rerank}
+        if embedding_backend is not None:
+            out["embedding_backend"] = self.settings.embedding_backend
+            out["embedding_switched"] = switched
+        return out
 
     def set_mcp_autostart(self, enabled: bool) -> dict:
         self.settings.mcp_autostart = bool(enabled)
@@ -526,7 +544,7 @@ class RAGService:
             return {**base, "dense_ok": False, "warning": (
                 f"Stored vectors are {stored_backend} but the embedder is "
                 f"{current_backend}: dense search skips old chunks. "
-                "Re-ingest affected documents.")}
+                "Re-embed the library (POST /api/reembed).")}
         if stored != current:
             return {**base, "dense_ok": False, "warning": (
                 f"Stored vectors are dim {stored} but the embedder is "
@@ -538,6 +556,46 @@ class RAGService:
                 "embeddings): dense search skips old chunks. "
                 "Re-ingest affected documents.")}
         return {**base, "dense_ok": True, "warning": ""}
+
+    # -- re-embed (after an embedding-backend switch) --------------------
+    def reembed_all(self, progress: ProgressCb | None = None,
+                    cancelled: CancelCb | None = None) -> dict:
+        """Re-embed every stored chunk with the active embedder.
+
+        Vectors are rewritten in place batch by batch (UPDATE only, so
+        concurrent deletes stay deleted); the recorded dim/backend tag is
+        switched only when the whole corpus is done. Until then
+        ``stored_backend != current`` keeps dense search off (hybrid falls
+        back to BM25), and a half-rewritten store of mixed widths is already
+        tolerated by the vector store (uncached path, mismatches skipped).
+        A cancelled or failed run leaves the old tag, so it can be re-run.
+        """
+        target = self.embedder
+        rows = self.vectors.all_chunks()
+        total = len(rows)
+        step = max(32, int(getattr(target, "batch_size", 32) or 32))
+        done = 0
+        if progress is not None:
+            progress(0, total, "re-embedding")
+        for start in range(0, total, step):
+            if cancelled is not None and cancelled():
+                return {"status": "cancelled", "done": done, "total": total}
+            if self.embedder is not target:
+                return {"status": "superseded", "done": done, "total": total}
+            part = rows[start:start + step]
+            embs = target.embed([r[2] for r in part])
+            self.vectors.replace_embeddings([r[0] for r in part], embs)
+            done += len(part)
+            if progress is not None:
+                progress(done, total, f"re-embedding ({done}/{total})")
+        with self._ingest_lock:
+            if self.embedder is not target:
+                return {"status": "superseded", "done": done, "total": total}
+            self.vectors.set_corpus_meta(self._current_dim() or 0,
+                                         self._current_backend())
+        self._dim_warned = False
+        return {"status": "done", "done": done, "total": total,
+                "backend": self._current_backend()}
 
     # -- export / import -------------------------------------------------
     def export_library(self) -> dict:
@@ -633,8 +691,9 @@ class RAGService:
                 sparse_text[s.chunk_id] = (s.doc_id, s.text)
 
         if hybrid:
-            fused = rrf_fuse(
-                [[h.chunk_id for h in dense_hits], list(sparse_by_id.keys())])
+            fused = convex_fuse(
+                {h.chunk_id: h.score for h in dense_hits}, sparse_by_id,
+                getattr(self.embedder, "fusion_dense_weight", DENSE_WEIGHT))
             ordered = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)
         else:
             fused = {h.chunk_id: h.score for h in dense_hits}
@@ -655,6 +714,7 @@ class RAGService:
         }
 
         answer: dict[str, float] = {}
+        cross = None
         if rerank_on and texts:
             pool_texts = [texts[cid] for cid in texts]
             cross = self._cross.score(query, pool_texts)
@@ -665,7 +725,9 @@ class RAGService:
 
         if rerank_on and texts:
             fnorm = minmax_norm({cid: fused[cid] for cid in texts})
-            final = {cid: _W_FUSED * fnorm[cid] + _W_ANSWER * answer[cid]
+            w_f, w_a = ((_W_FUSED_CE, _W_ANSWER_CE) if cross is not None
+                        else (_W_FUSED, _W_ANSWER))
+            final = {cid: w_f * fnorm[cid] + w_a * answer[cid]
                      for cid in texts}
             ranked = sorted(final.items(), key=lambda kv: (-kv[1], fused_rank[kv[0]]))
         else:

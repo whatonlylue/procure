@@ -217,7 +217,7 @@ def _read_qrels_tsv(path: str) -> dict[str, set[str]]:
 
 def pull(dataset: str, source: str = "mteb", split: str = "test",
          max_queries: int | None = None, dest: str | None = None,
-         fetcher=download_file) -> dict:
+         fetcher=None) -> dict:
     """Download a full dataset and convert it to bench-ready files.
 
     Writes ``corpus.jsonl`` + ``queries.jsonl`` (procure format),
@@ -228,6 +228,8 @@ def pull(dataset: str, source: str = "mteb", split: str = "test",
     """
     if split not in SPLITS:
         raise ValueError(f"unknown split {split!r} (want test|dev|train)")
+    # Resolved at call time (not as a default arg) so tests can patch it.
+    fetcher = fetcher or download_file
     key = dataset.split("/", 1)[-1].lower().replace("_", "-")
     repo = resolve_repo(dataset, source)
     dest = dest or os.path.join("data", "benchmarks", key)

@@ -1,4 +1,4 @@
-"""Hybrid search: FTS5 sparse store, RRF fusion, cross-encoder reranking.
+"""Hybrid search: FTS5 sparse store, convex score fusion, cross-encoder reranking.
 
 Sparse scoring is dependency-free (stdlib + sqlite3 FTS5). The cross-encoder
 rerank path loads lazily and offline-first; when the model is unavailable
@@ -7,16 +7,25 @@ scoring falls back to the coverage heuristic.
 from __future__ import annotations
 
 import contextlib
+import logging
 import math
 import os
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 
+from app.store import keepalive
+
+_log = logging.getLogger(__name__)
+
 _WORD = re.compile(r"[a-z0-9]+")
 RRF_K = 60
+# Weight of the dense list in convex fusion (potion's dense list is the
+# weaker one; ~0.7 suits a contextual embedder).
+DENSE_WEIGHT = 0.3
 
 _IN_CHUNK = 500
 
@@ -91,6 +100,9 @@ class SparseStore:
 
     _TABLE = "chunks_fts"
 
+    _MAP = "fts_rowmap"
+    _TOKENIZER = "porter unicode61 remove_diacritics 2"
+
     def __init__(self, path: str):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         self.path = path
@@ -98,9 +110,74 @@ class SparseStore:
             c.execute(
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS {self._TABLE} USING fts5("
                 "chunk_id UNINDEXED, doc_id UNINDEXED, text, "
-                "tokenize='unicode61 remove_diacritics 2')"
+                f"tokenize='{self._TOKENIZER}')"
+            )
+            c.execute(
+                f"CREATE TABLE IF NOT EXISTS {self._MAP} ("
+                "chunk_id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, "
+                "fts_rowid INTEGER NOT NULL)"
+            )
+            c.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{self._MAP}_doc "
+                f"ON {self._MAP}(doc_id)"
             )
             self._migrate_legacy(c)
+        self._upgrade_tokenizer()
+        self._backfill_rowmap()
+        keepalive(self.path)
+
+    def _fts_sql(self, c: sqlite3.Connection) -> str:
+        row = c.execute(
+            "SELECT sql FROM sqlite_master WHERE name=?", (self._TABLE,)
+        ).fetchone()
+        return (row[0] if row else "") or ""
+
+    def _upgrade_tokenizer(self) -> None:
+        """Rebuild an FTS table created with the pre-stemming tokenizer.
+
+        Rowids are preserved so ``fts_rowmap`` stays valid. Runs in one
+        write transaction and re-checks after taking the lock, so two
+        processes opening the same DB cannot both rebuild.
+        """
+        with self._session() as c:
+            if "porter" in self._fts_sql(c):
+                return
+            c.execute("BEGIN IMMEDIATE")
+            if "porter" in self._fts_sql(c):
+                return
+            new = f"{self._TABLE}_new"
+            c.execute(f"DROP TABLE IF EXISTS {new}")
+            c.execute(
+                f"CREATE VIRTUAL TABLE {new} USING fts5("
+                "chunk_id UNINDEXED, doc_id UNINDEXED, text, "
+                f"tokenize='{self._TOKENIZER}')"
+            )
+            c.execute(
+                f"INSERT INTO {new}(rowid, chunk_id, doc_id, text) "
+                f"SELECT rowid, chunk_id, doc_id, text FROM {self._TABLE}"
+            )
+            c.execute(f"DROP TABLE {self._TABLE}")
+            c.execute(f"ALTER TABLE {new} RENAME TO {self._TABLE}")
+
+    def _backfill_rowmap(self) -> None:
+        """Populate ``fts_rowmap`` once for an FTS table that predates it."""
+        with self._session() as c:
+            if c.execute(f"SELECT 1 FROM {self._MAP} LIMIT 1").fetchone():
+                return
+            if not c.execute(f"SELECT 1 FROM {self._TABLE} LIMIT 1").fetchone():
+                return
+            c.execute("BEGIN IMMEDIATE")
+            if c.execute(f"SELECT 1 FROM {self._MAP} LIMIT 1").fetchone():
+                return
+            # Old data may hold duplicate chunk_ids: keep the newest row.
+            c.execute(
+                f"DELETE FROM {self._TABLE} WHERE rowid NOT IN "
+                f"(SELECT MAX(rowid) FROM {self._TABLE} GROUP BY chunk_id)"
+            )
+            c.execute(
+                f"INSERT INTO {self._MAP}(chunk_id, doc_id, fts_rowid) "
+                f"SELECT chunk_id, doc_id, rowid FROM {self._TABLE}"
+            )
 
     def _migrate_legacy(self, c: sqlite3.Connection) -> None:
         """Copy hand-rolled ``chunks``/``postings`` rows into FTS5, then drop."""
@@ -139,17 +216,36 @@ class SparseStore:
     def upsert_chunks(self, ids: list[str], doc_ids: list[str], texts: list[str]) -> None:
         with self._session() as c:
             for cid, did, text in zip(ids, doc_ids, texts):
-                c.execute(f"DELETE FROM {self._TABLE} WHERE chunk_id=?", (cid,))
-                c.execute(
+                old = c.execute(
+                    f"SELECT fts_rowid FROM {self._MAP} WHERE chunk_id=?", (cid,)
+                ).fetchone()
+                if old:
+                    c.execute(f"DELETE FROM {self._TABLE} WHERE rowid=?", (old[0],))
+                cur = c.execute(
                     f"INSERT INTO {self._TABLE} (chunk_id, doc_id, text)"
                     " VALUES (?, ?, ?)",
                     (cid, did, text),
                 )
+                c.execute(
+                    f"INSERT OR REPLACE INTO {self._MAP}"
+                    "(chunk_id, doc_id, fts_rowid) VALUES (?, ?, ?)",
+                    (cid, did, cur.lastrowid),
+                )
 
     def delete_by_doc(self, doc_id: str) -> int:
         with self._session() as c:
-            cur = c.execute(f"DELETE FROM {self._TABLE} WHERE doc_id=?", (doc_id,))
-            return int(cur.rowcount or 0)
+            rowids = [r[0] for r in c.execute(
+                f"SELECT fts_rowid FROM {self._MAP} WHERE doc_id=?", (doc_id,)
+            ).fetchall()]
+            deleted = 0
+            for batch in _batched(rowids):
+                cur = c.executemany(
+                    f"DELETE FROM {self._TABLE} WHERE rowid=?",
+                    [(r,) for r in batch],
+                )
+                deleted += int(cur.rowcount or 0)
+            c.execute(f"DELETE FROM {self._MAP} WHERE doc_id=?", (doc_id,))
+            return deleted
 
     def count(self) -> int:
         with self._session() as c:
@@ -224,6 +320,16 @@ def rrf_fuse(ranked_lists: list[list[str]], k: int = RRF_K) -> dict[str, float]:
     return fused
 
 
+def convex_fuse(dense: dict[str, float], sparse: dict[str, float],
+                w_dense: float = DENSE_WEIGHT) -> dict[str, float]:
+    """Min-max normalize each list, then ``w_dense*dense + (1-w_dense)*sparse``;
+    a chunk missing from a list contributes 0 for it."""
+    d = minmax_norm(dense)
+    sp = minmax_norm(sparse)
+    return {cid: w_dense * d.get(cid, 0.0) + (1.0 - w_dense) * sp.get(cid, 0.0)
+            for cid in dict.fromkeys([*dense, *sparse])}
+
+
 def minmax_norm(scores: dict[str, float]) -> dict[str, float]:
     """Min-max normalize to [0, 1]; all-equal maps to 1.0."""
     if not scores:
@@ -236,118 +342,112 @@ def minmax_norm(scores: dict[str, float]) -> dict[str, float]:
     return {cid: (s - lo) / span for cid, s in scores.items()}
 
 
-@contextlib.contextmanager
-def _hf_offline(allow_download: bool) -> Iterator[None]:
-    """Force HuggingFace Hub offline unless downloads are allowed.
-
-    Patches both the env var and the already-imported constant snapshot.
-    Callers must hold their loader lock: os.environ is process-global.
-    """
-    if allow_download:
-        yield
-        return
-    restore_env = os.environ.get("HF_HUB_OFFLINE")
-    hf_const = None
-    restore_const = None
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    try:
-        try:
-            import huggingface_hub.constants as hf_const
-            restore_const = hf_const.HF_HUB_OFFLINE
-            hf_const.HF_HUB_OFFLINE = True
-        except ImportError:
-            hf_const = None
-        yield
-    finally:
-        if restore_env is None:
-            os.environ.pop("HF_HUB_OFFLINE", None)
-        else:
-            os.environ["HF_HUB_OFFLINE"] = restore_env
-        if hf_const is not None:
-            hf_const.HF_HUB_OFFLINE = restore_const
+#: After a failed load the scorer stays on the coverage fallback for this
+#: long, then retries (a transient network failure must not disable the
+#: reranker until restart).
+CROSS_ENCODER_RETRY_SECONDS = 600.0
 
 
 class CrossEncoderScorer:
-    """Local cross-encoder reranker, loaded lazily and offline-first.
+    """Local cross-encoder reranker (ONNX + numpy, no torch), loaded lazily.
 
-    Uses a cached sentence-transformers CrossEncoder model when available;
-    never downloads unless ``allow_download`` is set. When the model cannot
-    be loaded (not cached, library missing), :meth:`score` returns None and
-    callers fall back to the coverage heuristic.
+    The first :meth:`score` call starts a background load (download + session
+    creation) and returns None; callers fall back to the coverage heuristic
+    until the model is ready. A failed load is logged once and retried after
+    :data:`CROSS_ENCODER_RETRY_SECONDS`.
+    :meth:`warmup` loads synchronously.
     """
 
-    def __init__(self, model_name: str = "", allow_download: bool = False):
+    def __init__(self, model_name: str = "", allow_download: bool = True):
         self.model_name = (model_name or "").strip()
         self.allow_download = allow_download
         self._model = None
         self._tried = False
+        self._failed_at: float | None = None
+        self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
     @property
     def available(self) -> bool:
-        return self._load() is not None
+        """True once a model is in memory (never triggers a load)."""
+        return self.loaded
 
     @property
     def loaded(self) -> bool:
-        """True once a model is in memory (never triggers a load)."""
         with self._lock:
             return self._model is not None
 
-    def _load(self):
+    def _do_load(self) -> None:
+        model = None
+        try:
+            from app.rerank_onnx import OnnxCrossEncoder
+            model = OnnxCrossEncoder(self.model_name,
+                                     allow_download=self.allow_download)
+        except Exception as exc:  # offline/no cache, missing runtime, bad files
+            _log.warning("cross-encoder %s unavailable, using coverage "
+                         "fallback: %s", self.model_name, exc)
         with self._lock:
+            self._model = model
+            self._tried = True
+            self._failed_at = None if model is not None else time.monotonic()
+            self._thread = None
+
+    def _retry_due(self) -> bool:
+        """Caller holds the lock: a failed load older than the cooldown."""
+        return (self._model is None and self._failed_at is not None
+                and time.monotonic() - self._failed_at
+                >= CROSS_ENCODER_RETRY_SECONDS)
+
+    def warmup(self, block: bool = True) -> bool:
+        """Load the model; returns True when it is ready."""
+        if not self.model_name:
+            return False
+        with self._lock:
+            if self._tried and self._retry_due():
+                self._tried = False
+                self._failed_at = None
             if self._tried:
-                return self._model
-            # Offline enforcement must patch huggingface_hub.constants too: the
-            # flag is snapshotted at import time, so setting the env var after
-            # the library is already imported would NOT stop a download.
-            with _hf_offline(self.allow_download):
-                try:
-                    if not self.model_name:
-                        return None
-                    try:
-                        from sentence_transformers import CrossEncoder
-                    except ImportError:
-                        return None
-                    try:
-                        self._model = CrossEncoder(self.model_name)
-                    except Exception:
-                        self._model = None
-                finally:
-                    # Only mark attempted once the load has finished, so a
-                    # concurrent caller blocks on the lock instead of silently
-                    # falling back mid-load.
-                    self._tried = True
-            return self._model
+                return self._model is not None
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._do_load, name="cross-encoder-load", daemon=True)
+                self._thread.start()
+            thread = self._thread
+        if block:
+            thread.join()
+        return self.loaded
 
     def score(self, query: str, texts: list[str]) -> list[float] | None:
-        """Cross-encoder relevance logits, or None when unavailable."""
-        model = self._load()
-        if model is None or not texts:
+        """Cross-encoder relevance logits, or None when unavailable/loading."""
+        if not self.model_name or not texts:
+            return None
+        with self._lock:
+            model = self._model
+            tried = self._tried and not self._retry_due()
+        if model is None:
+            if not tried:
+                self.warmup(block=False)
             return None
         try:
-            out = model.predict([(query, t) for t in texts])
+            return [float(x) for x in model.score(query, texts)]
         except Exception:
             return None
-        return [float(x) for x in out]
-
-
-def sigmoid(xs: list[float]) -> list[float]:
-    # Clamp: math.exp overflows for x < -709.
-    return [1.0 / (1.0 + math.exp(-max(-500.0, min(500.0, x)))) for x in xs]
 
 
 def combine_answerability(cross: list[float] | None,
                           coverage: list[float]) -> list[float]:
-    """Blend sigmoid cross-encoder scores with coverage (0.6/0.4);
+    """Cross-encoder logits min-max scaled over the candidate pool;
     coverage alone when no cross-encoder scores are available.
 
-    Sigmoid (absolute) rather than min-max: min-max forces the top
-    candidate to 1.0 even when every candidate is irrelevant.
+    A sigmoid on raw logits saturated (Ettin emits roughly -2..+9, so every
+    plausible candidate landed near 1.0 and the reranker added nothing).
+    Min-max within the 15-30 candidate pool keeps the full spread; the
+    all-equal case maps to 1.0 (see :func:`minmax_norm`).
     """
     if cross is None:
         return list(coverage)
-    norm = sigmoid(cross)
-    return [0.6 * a + 0.4 * b for a, b in zip(norm, coverage)]
+    norm = minmax_norm({str(i): x for i, x in enumerate(cross)})
+    return [norm[str(i)] for i in range(len(cross))]
 
 
 def coverage_score(query: str, text: str, idf: dict[str, float] | None = None) -> float:

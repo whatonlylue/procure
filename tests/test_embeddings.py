@@ -62,7 +62,7 @@ class EmbedBehaviorTest(unittest.TestCase):
         self.assertEqual(len(vecs), 2)
         for v in vecs:
             self.assertEqual(len(v), DIM)
-            self.assertAlmostEqual(float(np.linalg.norm(v)), 1.0)
+            self.assertAlmostEqual(float(np.linalg.norm(v)), 1.0, places=6)  # float32 norm
 
     def test_empty_input_needs_no_model(self) -> None:
         e = Model2VecEmbedder()
