@@ -116,6 +116,7 @@ class SearchResponse(BaseModel):
 class SettingsPatch(BaseModel):
     search: str | None = None
     rerank: str | None = None
+    embedding_backend: str | None = None
     mcp_autostart: bool | None = None
 
 
@@ -136,7 +137,7 @@ class SkillsInstall(BaseModel):
 @app.get("/api/health")
 def health() -> dict:
     svc = get_service()
-    neural = _have_module("sentence_transformers") and _have_module("torch")
+    neural = bool(svc.settings.cross_encoder_model) and _have_module("onnxruntime")
     return {
         "status": "ok",
         "version": __version__,
@@ -145,6 +146,7 @@ def health() -> dict:
         "documents": svc.meta.count(),
         "search": svc.settings.search_mode,
         "rerank": svc.settings.rerank,
+        "embedding_backend": svc.settings.embedding_backend,
         # Cheap flags only: .available would LOAD the model on first
         # call, and the frontend polls health after every action.
         "rerank_backend": "neural" if neural else "heuristic",
@@ -319,6 +321,23 @@ def list_tags() -> dict:
     return {"tags": get_service().list_tags()}
 
 
+def _start_reembed(svc) -> dict:
+    """Submit a re-embed job unless one is already queued/running."""
+    jobs = get_job_manager()
+    for j in jobs.list():
+        if j["kind"] == "reembed" and j["status"] in ("queued", "running"):
+            return j
+    return jobs.submit(
+        "reembed", svc._current_backend() or "embeddings",
+        lambda h: svc.reembed_all(progress=h.update, cancelled=h.is_cancelled))
+
+
+@app.post("/api/reembed")
+def reembed() -> dict:
+    """Re-embed every stored chunk with the active embedding backend."""
+    return {"job": _start_reembed(get_service())}
+
+
 @app.get("/api/jobs")
 def list_jobs() -> dict:
     return {"jobs": get_job_manager().list()}
@@ -358,14 +377,18 @@ def patch_settings(patch: SettingsPatch) -> dict:
     svc = get_service()
     out: dict = {}
     try:
-        if patch.search is not None or patch.rerank is not None:
-            out.update(svc.update_settings(patch.search, patch.rerank))
+        if (patch.search is not None or patch.rerank is not None
+                or patch.embedding_backend is not None):
+            out.update(svc.update_settings(
+                patch.search, patch.rerank, patch.embedding_backend))
         if patch.mcp_autostart is not None:
             out.update(svc.set_mcp_autostart(patch.mcp_autostart))
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     if not out:
         raise HTTPException(400, "Nothing to update")
+    if out.pop("embedding_switched", False):
+        out["job"] = _start_reembed(svc)
     out["mcp_autostart"] = svc.settings.mcp_autostart
     return out
 
