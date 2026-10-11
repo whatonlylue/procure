@@ -54,6 +54,7 @@ export interface Health {
   documents: number;
   search: string;
   rerank: string;
+  embedding_backend?: string;
   rerank_backend?: string;
   rerank_models_loaded?: { cross_encoder: boolean };
   mcp_autostart?: boolean;
@@ -202,7 +203,9 @@ export async function listTags(): Promise<TagCount[]> {
 export interface SettingsState {
   search: string;
   rerank: string;
+  embedding_backend?: string;
   mcp_autostart: boolean;
+  job?: Job;
 }
 
 // Backend truthy parsing lives server-side; the UI only needs the two states.

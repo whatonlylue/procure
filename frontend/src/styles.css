@@ -206,32 +206,27 @@ body {
 .side-nav button.on .key { border-color: var(--accent-line); color: var(--accent); }
 .side-nav .count { margin-left: auto; font-size: 12px; color: var(--muted); }
 
-.side-meta { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.side-meta { margin: 0; display: flex; flex-direction: column; }
+.side-meta {
+  gap: 0;
+  border: 1px solid var(--line-soft);
+  background: var(--panel);
+  border-radius: var(--radius);
+  padding: 4px 11px;
+}
 .side-meta div {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
   gap: 8px;
-  border: 1px solid var(--line-soft);
-  background: var(--panel);
-  padding: 6px 9px;
+  padding: 7px 0;
   font-size: 12px;
-  border-radius: var(--radius);
 }
+.side-meta div + div { border-top: 1px dashed var(--line); }
 .side-meta dt { color: var(--muted); font-size: 11px; letter-spacing: 0.06em; }
 .side-meta dd { margin: 0; font-weight: 600; color: var(--ink); }
 
-.side-hint { font-size: 12px; color: var(--faint); margin: 0; }
 .warn { font-size: 11px; color: var(--danger); border: 1px solid rgba(242, 109, 95, 0.45); background: var(--danger-wash); padding: 6px 9px; border-radius: var(--radius); margin: 0; }
-.side-foot {
-  margin-top: auto;
-  display: flex;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--faint);
-}
-.side-foot span { border: 1px solid var(--line-soft); padding: 3px 8px; border-radius: var(--radius); }
-
 /* ---- theme switcher ---- */
 .theme-swatches { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .theme-swatches button {
@@ -817,4 +812,24 @@ button.primary:hover { background: var(--accent-hover); border-color: var(--acce
 
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
+}
+
+.settings-card { display: flex; flex-direction: column; gap: 10px; max-width: 640px; }
+.settings-card .ctl { align-self: flex-start; }
+
+/* ---- long-hover tooltip ---- */
+.tip {
+  position: fixed;
+  z-index: 1000;
+  max-width: min(320px, calc(100vw - 16px));
+  padding: 8px 11px;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-line;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
 }
