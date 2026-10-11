@@ -18,10 +18,11 @@ deliberately shares the ProcureHelper name rather than getting its own.
 
 Embeddings run on model2vec (potion-retrieval-32M, app/embeddings.py),
 so model2vec + huggingface_hub ship in the sidecar and the model
-(~120MB) downloads once into the HF cache on first ingest. The torch
-rerank stack (torch, sentence-transformers, transformers) stays excluded:
-every neural import in app/ degrades gracefully, which keeps torch's
-~2GB out of the binary.
+(~120MB) downloads once into the HF cache on first ingest. The reranker
+now runs torch-free via onnxruntime (Ettin ONNX model, downloaded on first
+use just like potion), so the torch rerank stack (torch,
+sentence-transformers, transformers) stays excluded: every neural import in
+app/ degrades gracefully, which keeps torch's ~2GB out of the binary.
 
 The benchmark harness (app.bench) is likewise excluded: it is source-only
 (still in git for `git clone` users, but not in wheels either), and
@@ -40,7 +41,6 @@ a = Analysis(
         "uvicorn.logging",
         "uvicorn.loops.auto",
         "uvicorn.protocols.http.auto",
-        "uvicorn.protocols.websockets.auto",
         "uvicorn.lifespan.on",
     ],
     hookspath=[],
@@ -52,6 +52,7 @@ a = Analysis(
         "app.bench.metrics",
         "app.bench.runner",
         "app.bench.sources",
+        "hf_xet",  # optional HF download accelerator; plain HTTP fallback
         "torch",
         "sentence_transformers",
         "transformers",

@@ -88,3 +88,29 @@ uv/Docker).
    bundle — change to data dir / bundle resources first.
 2. Relative default `data/` inside a read-only signed `.app` — the
    `platformdirs` change is mandatory, not optional.
+
+## Bundled Tesseract (OCR for scanned PDFs)
+
+The desktop app ships a self-contained Tesseract 5 as a Tauri resource
+(`bundle.resources` maps `src-tauri/resources/tesseract/` to `tesseract/`
+inside the bundle). At launch `spawn_sidecar` (src-tauri/src/main.rs) sets
+`PROCURE_TESSERACT` (absolute path to the binary) and `TESSDATA_PREFIX`
+(the bundled `tessdata/` dir) on the sidecar; if the resource is missing
+(dev builds) nothing is set.
+
+Prerequisite for any `tauri build` / `scripts/build_desktop.sh`: stage it first.
+
+- macOS: `brew install tesseract && scripts/bundle_tesseract.sh`. Copies the
+  real binary, collects every non-system dylib transitively into `lib/`,
+  rewrites install names (`@executable_path/lib`, `@loader_path`), ad-hoc
+  re-signs each Mach-O, and installs `eng.traineddata` (tessdata_fast, pinned
+  commit, sha256-verified). About 13 MB.
+- Windows: `scripts/bundle_tesseract.ps1` (installs the UB-Mannheim build via
+  Chocolatey, copies `tesseract.exe` + DLLs + `eng.traineddata`). Only
+  exercised in CI; untested locally.
+- Linux: no bundle; `build_desktop.sh` just creates an empty dir.
+
+`tauri-build` fails if `src-tauri/resources/tesseract/` does not exist (an
+empty dir is fine), so `cargo check`/`cargo test` on a fresh checkout need
+`mkdir -p src-tauri/resources/tesseract` (CI does this). The staged dir is
+gitignored. Licenses for the bundled libraries land in `LICENSES/`.
