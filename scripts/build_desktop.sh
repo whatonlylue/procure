@@ -39,6 +39,13 @@ TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 mkdir -p src-tauri/binaries
 cp "dist/ProcureHelper${EXE}" "src-tauri/binaries/ProcureHelper-${TRIPLE}${EXE}"
 
+echo "==> bundled Tesseract"
+case "$OS" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT) powershell.exe -NoProfile -File scripts/bundle_tesseract.ps1 ;;
+  Darwin) scripts/bundle_tesseract.sh ;;
+  *) mkdir -p src-tauri/resources/tesseract ;;  # no bundled OCR on Linux
+esac
+
 echo "==> Tauri bundle"
 cargo tauri build --bundles "$BUNDLES"
 

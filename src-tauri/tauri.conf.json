@@ -25,6 +25,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/ProcureHelper"]
+    "externalBin": ["binaries/ProcureHelper"],
+    "resources": {
+      "resources/tesseract/": "tesseract/"
+    }
   }
 }

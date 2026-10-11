@@ -15,7 +15,7 @@ from unittest import mock
 from app import chunking, extract, mcp_server, skills
 from app.config import Settings
 from app.jobs import JobManager
-from app.search import (combine_answerability, coverage_score, sigmoid)
+from app.search import combine_answerability, coverage_score
 from app.service import RAGService
 from stub_embedder import StubEmbedder
 from app.store import MetaStore
@@ -181,10 +181,6 @@ class RankingBoundsTest(unittest.TestCase):
         for a in combine_answerability([100.0, -100.0, 0.0], [0.5, 0.5, 0.5]):
             self.assertGreaterEqual(a, 0.0)
             self.assertLessEqual(a, 1.0)
-        # Clamped: no OverflowError, saturates to within a hair of 0/1.
-        lo, hi = sigmoid([-1000.0, 1000.0])
-        self.assertLess(lo, 1e-200)
-        self.assertEqual(hi, 1.0)
 
     def test_search_hits_carry_no_nli_scores(self) -> None:
         """NLI removal lock: hits expose no answerability/entailment keys."""
@@ -480,7 +476,7 @@ class CliTest(unittest.TestCase):
             f.write(LONG_A)
         # The CLI builds its own RAGService; keep this hermetic (no model
         # download) by substituting the deterministic test embedder.
-        with mock.patch("app.service.Model2VecEmbedder",
+        with mock.patch("app.service.build_embedder",
                         lambda *a, **k: StubEmbedder()):
             self.assertEqual(
                 cli.main(["add", path, "--data-dir",

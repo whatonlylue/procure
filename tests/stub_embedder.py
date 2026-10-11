@@ -13,8 +13,17 @@ live-model test).
 from __future__ import annotations
 
 import hashlib
+import os
 
 import numpy as np
+
+# Hermetic suite: no test may reach the network. Every service test imports
+# this module, so pin the env-driven defaults that would otherwise start a
+# background Hugging Face download (reranker) or load the Granite embedder.
+os.environ["PROCURE_CROSS_ENCODER"] = ""
+os.environ["PROCURE_CROSS_ENCODER_ALLOW_DOWNLOAD"] = "0"
+os.environ["PROCURE_EMBEDDING_BACKEND"] = "potion"
+os.environ["PROCURE_EMBEDDING_ALLOW_DOWNLOAD"] = "0"
 
 
 class StubEmbedder:

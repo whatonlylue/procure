@@ -68,6 +68,10 @@ jobs:
           touch "src-tauri/binaries/ProcureHelper-${TRIPLE}"
           chmod +x "src-tauri/binaries/ProcureHelper-${TRIPLE}"
 
+      # tauri-build errors on a missing bundle.resources dir; an empty one is fine.
+      - name: Stage empty Tesseract resource dir for cargo test
+        run: mkdir -p src-tauri/resources/tesseract
+
       - name: Desktop shell tests
         run: |
           cd src-tauri
@@ -133,6 +137,19 @@ jobs:
           $triple = ((rustc -vV | Select-String '^host: ') -replace 'host: ','').Trim()
           New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
           Copy-Item dist/ProcureHelper.exe "src-tauri/binaries/ProcureHelper-$triple.exe"
+
+      # Self-contained Tesseract for OCR of scanned PDFs, shipped as a Tauri
+      # resource (bundle.resources). Must run before `tauri build`.
+      - name: Bundle Tesseract (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          command -v tesseract >/dev/null || brew install tesseract
+          scripts/bundle_tesseract.sh
+
+      - name: Bundle Tesseract (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/bundle_tesseract.ps1
 
       # The Tauri CLI ships as the @tauri-apps/cli npm devDependency, so
       # `npm ci` above already installed the runner-correct prebuilt binary
