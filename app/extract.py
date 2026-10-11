@@ -136,16 +136,16 @@ def _extract_pdf(path: str, ocr_mode: str) -> str:
                 texts[i] = f"{texts[i]}\n\n{text.strip()}".strip()
     body = "\n\n".join(t for t in texts if t)
     if not body and thin and pages:
+        if ocr_mode == "off":
+            raise ValueError(
+                "No text found — this looks like a scanned PDF, but OCR is "
+                "disabled (PROCURE_OCR=off). Set it to auto and retry"
+            )
         if not available():
             raise ValueError(
                 "No text found — this looks like a scanned PDF. "
                 "OCR needs Tesseract: install it or set PROCURE_TESSERACT, "
                 "then retry"
-            )
-        if ocr_mode == "off":
-            raise ValueError(
-                "No text found — this looks like a scanned PDF, but OCR is "
-                "disabled (PROCURE_OCR=off). Set it to auto and retry"
             )
         raise ValueError(
             "No text found — this looks like a scanned PDF, but OCR "
