@@ -213,6 +213,9 @@ def remap_queries(queries: list[dict], mapping: dict[str, str]) -> list[dict]:
 def run_benchmark(service, corpus: list[dict], queries: list[dict],
                   ks: tuple[int, ...] = (5, 10)) -> BenchmarkReport:
     """Ingest-then-score convenience entry point used by the CLI and tests."""
+    cross = getattr(service, "_cross", None)
+    if cross is not None and hasattr(cross, "warmup"):
+        cross.warmup()  # never benchmark the coverage fallback by accident
     t0 = time.perf_counter()
     mapping = ingest_corpus(service, corpus)
     ingest_s = time.perf_counter() - t0
