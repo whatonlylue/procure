@@ -14,6 +14,7 @@ can open the window on the right URL.
 from __future__ import annotations
 
 import argparse
+import multiprocessing
 import os
 import sys
 import threading
@@ -499,4 +500,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Frozen builds re-invoke this binary for multiprocessing helpers (resource tracker); must run before argparse.
+    multiprocessing.freeze_support()
     sys.exit(main())
